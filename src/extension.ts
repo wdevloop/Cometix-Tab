@@ -359,7 +359,16 @@ export async function activate(context: vscode.ExtensionContext) {
 			try {
 				const editor = vscode.window.activeTextEditor;
 				if (!editor) return;
+				
+				logger.info(`🔄 触发续写命令, 参数:`, args);
+				
+				// 短暂延迟确保文本已更新
+				await new Promise(resolve => setTimeout(resolve, 100));
+				
+				// 触发新的补全
 				await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+				
+				logger.info('✅ 续写补全已触发');
 			} catch (e) {
 				logger.error('triggerContinuation failed', e as Error);
 			}

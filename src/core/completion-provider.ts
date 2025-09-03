@@ -1212,13 +1212,36 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       const config = ConfigManager.getConfig();
       const features = (config as any).features || {};
       if (features.continuationGeneration === true) {
-        // 简单策略：若已接受比例 > 0.6，则触发续写
+        // 智能续写策略
         const accepted = info.acceptedLength || 0;
         const total = item.insertText.toString().length || 1;
         const ratio = accepted / total;
-        if (ratio > 0.6) {
-          this.logger.info(`🔄 触发续写: ratio=${ratio.toFixed(2)}`);
-          void vscode.commands.executeCommand('cometix-tab.triggerContinuation', { ratio });
+        const acceptedText = item.insertText.toString().substring(0, accepted);
+        
+        // 续写条件：
+        // 1. 接受比例 > 60%
+        // 2. 接受的内容以完整的词/语句结束
+        // 3. 不是只接受了空白字符
+        const shouldTrigger = ratio > 0.6 && 
+                             acceptedText.trim().length > 5 &&
+                             (acceptedText.endsWith(' ') || 
+                              acceptedText.endsWith(';') || 
+                              acceptedText.endsWith(',') ||
+                              acceptedText.endsWith('\n') ||
+                              acceptedText.match(/\w$/)); // 以单词字符结束
+        
+        if (shouldTrigger) {
+          this.logger.info(`🔄 触发续写: ratio=${ratio.toFixed(2)}, accepted="${acceptedText.slice(-20)}"`);
+          // 延迟触发以确保编辑器状态稳定
+          setTimeout(() => {
+            void vscode.commands.executeCommand('cometix-tab.triggerContinuation', { 
+              ratio, 
+              acceptedLength: accepted,
+              triggerType: info.kind 
+            });
+          }, 150);
+        } else {
+          this.logger.debug(`🚫 不触发续写: ratio=${ratio.toFixed(2)}, conditions not met`);
         }
       }
     } catch (e) {
