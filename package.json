@@ -111,6 +111,31 @@
         "command": "cometix-tab.triggerContinuation",
         "title": "Trigger Continuation",
         "category": "Cometix Tab"
+      },
+      {
+        "command": "cometix-tab.acceptCompletion",
+        "title": "Accept Inline Completion",
+        "category": "Cometix Tab"
+      },
+      {
+        "command": "cometix-tab.dismissCompletion",
+        "title": "Dismiss Inline Completion",
+        "category": "Cometix Tab"
+      },
+      {
+        "command": "cometix-tab.nextCompletion",
+        "title": "Next Inline Completion",
+        "category": "Cometix Tab"
+      },
+      {
+        "command": "cometix-tab.previousCompletion",
+        "title": "Previous Inline Completion",
+        "category": "Cometix Tab"
+      },
+      {
+        "command": "cometix-tab.forceTriggerCompletion",
+        "title": "Force Trigger Completion",
+        "category": "Cometix Tab"
       }
     ],
     "keybindings": [
@@ -120,6 +145,39 @@
         "mac": "option+\\",
         "when": "editorTextFocus && !editorReadonly",
         "description": "Manual trigger AI code completion (GitHub Copilot style: Alt+\\)"
+      },
+      {
+        "command": "cometix-tab.acceptCompletion",
+        "key": "tab",
+        "when": "editorTextFocus && inlineSuggestionVisible && !editorReadonly",
+        "description": "Accept inline completion with Tab"
+      },
+      {
+        "command": "cometix-tab.dismissCompletion",
+        "key": "escape",
+        "when": "editorTextFocus && inlineSuggestionVisible && !editorReadonly",
+        "description": "Dismiss inline completion with Escape"
+      },
+      {
+        "command": "cometix-tab.nextCompletion",
+        "key": "alt+]",
+        "mac": "option+]",
+        "when": "editorTextFocus && inlineSuggestionVisible && !editorReadonly",
+        "description": "Navigate to next inline completion"
+      },
+      {
+        "command": "cometix-tab.previousCompletion",
+        "key": "alt+[",
+        "mac": "option+[",
+        "when": "editorTextFocus && inlineSuggestionVisible && !editorReadonly",
+        "description": "Navigate to previous inline completion"
+      },
+      {
+        "command": "cometix-tab.forceTriggerCompletion",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && !editorReadonly",
+        "description": "Force trigger completion (ignoring debounce and filters)"
       }
     ],
     "configuration": {
@@ -254,7 +312,7 @@
           "properties": {
             "newStateMachine": {
               "type": "boolean",
-              "default": false,
+              "default": true,
               "description": "Enable new completion state machine integration"
             },
             "enhancedProposedAPI": {
@@ -264,14 +322,14 @@
             },
             "continuationGeneration": {
               "type": "boolean",
-              "default": false,
+              "default": true,
               "description": "Enable partial-accept continuation flow"
             }
           },
           "default": {
-            "newStateMachine": false,
+            "newStateMachine": true,
             "enhancedProposedAPI": true,
-            "continuationGeneration": false
+            "continuationGeneration": true
           },
           "description": "Feature flags for progressive rollout"
         },

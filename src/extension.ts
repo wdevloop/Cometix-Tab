@@ -354,6 +354,125 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 		});
 		
+		// 🎹 新的键盘快捷键命令处理器
+		
+		// 接受补全 (Tab)
+		const acceptCompletionCommand = vscode.commands.registerCommand('cometix-tab.acceptCompletion', async () => {
+			try {
+				// 检查状态机状态
+				if (completionProvider && (completionProvider as any).stateMachine) {
+					const state = (completionProvider as any).stateMachine.getState();
+					if (state !== 'visible') {
+						logger.debug('🚫 不在VISIBLE状态，无法接受补全');
+						return;
+					}
+				}
+				
+				// 使用 VSCode 内置的接受补全命令
+				await vscode.commands.executeCommand('editor.action.inlineSuggest.commit');
+				logger.debug('✅ 补全已接受 (Tab)');
+			} catch (error) {
+				logger.error('接受补全失败', error as Error);
+			}
+		});
+
+		// 取消/忽略补全 (Escape)
+		const dismissCompletionCommand = vscode.commands.registerCommand('cometix-tab.dismissCompletion', async () => {
+			try {
+				// 检查状态机状态
+				if (completionProvider && (completionProvider as any).stateMachine) {
+					const state = (completionProvider as any).stateMachine.getState();
+					if (state !== 'visible') {
+						logger.debug('🚫 不在VISIBLE状态，无法取消补全');
+						return;
+					}
+				}
+				
+				// 使用 VSCode 内置的取消补全命令
+				await vscode.commands.executeCommand('editor.action.inlineSuggest.hide');
+				logger.debug('🚫 补全已取消 (Escape)');
+			} catch (error) {
+				logger.error('取消补全失败', error as Error);
+			}
+		});
+
+		// 下一个补全建议 (Alt+])
+		const nextCompletionCommand = vscode.commands.registerCommand('cometix-tab.nextCompletion', async () => {
+			try {
+				// 检查状态机状态
+				if (completionProvider && (completionProvider as any).stateMachine) {
+					const state = (completionProvider as any).stateMachine.getState();
+					if (state !== 'visible') {
+						logger.debug('🚫 不在VISIBLE状态，无法导航补全');
+						return;
+					}
+				}
+				
+				// 使用 VSCode 内置的下一个建议命令
+				await vscode.commands.executeCommand('editor.action.inlineSuggest.showNext');
+				logger.debug('➡️ 已切换到下一个补全建议');
+			} catch (error) {
+				logger.error('切换到下一个补全失败', error as Error);
+			}
+		});
+
+		// 上一个补全建议 (Alt+[)
+		const previousCompletionCommand = vscode.commands.registerCommand('cometix-tab.previousCompletion', async () => {
+			try {
+				// 检查状态机状态
+				if (completionProvider && (completionProvider as any).stateMachine) {
+					const state = (completionProvider as any).stateMachine.getState();
+					if (state !== 'visible') {
+						logger.debug('🚫 不在VISIBLE状态，无法导航补全');
+						return;
+					}
+				}
+				
+				// 使用 VSCode 内置的上一个建议命令
+				await vscode.commands.executeCommand('editor.action.inlineSuggest.showPrevious');
+				logger.debug('⬅️ 已切换到上一个补全建议');
+			} catch (error) {
+				logger.error('切换到上一个补全失败', error as Error);
+			}
+		});
+
+		// 强制触发补全 (Ctrl+Enter)
+		const forceTriggerCompletionCommand = vscode.commands.registerCommand('cometix-tab.forceTriggerCompletion', async () => {
+			try {
+				const editor = vscode.window.activeTextEditor;
+				if (!editor) {
+					vscode.window.showWarningMessage('没有活动的编辑器');
+					return;
+				}
+				
+				logger.info('🚀 强制触发补全 (Ctrl+Enter)');
+				
+				// 强制触发补全，忽略防抖和过滤条件
+				const document = editor.document;
+				const position = editor.selection.active;
+				
+				// 使用特殊的强制触发上下文
+				const forceContext = {
+					requestUuid: 'force-trigger',
+					triggerKind: vscode.InlineCompletionTriggerKind.Invoke
+				};
+				
+				// 调用 provider 的 provideInlineCompletionItems 方法
+				const token = new vscode.CancellationTokenSource().token;
+				await completionProvider.provideInlineCompletionItems(
+					document, 
+					position, 
+					forceContext as any, 
+					token
+				);
+				
+				logger.info('✅ 强制补全已触发');
+			} catch (error) {
+				logger.error('强制触发补全失败', error as Error);
+				vscode.window.showErrorMessage(`强制触发补全失败: ${error}`);
+			}
+		});
+
 		// 注册续写命令（用于部分接受后触发续写）
 		const triggerContinuationCommand = vscode.commands.registerCommand('cometix-tab.triggerContinuation', async (args?: any) => {
 			try {
@@ -408,6 +527,12 @@ export async function activate(context: vscode.ExtensionContext) {
 			refreshConfigCommand,
 			testConnectionCommand,
 			manualTriggerCompletionCommand,
+			// 🎹 新的键盘快捷键命令
+			acceptCompletionCommand,
+			dismissCompletionCommand,
+			nextCompletionCommand,
+			previousCompletionCommand,
+			forceTriggerCompletionCommand,
 			triggerContinuationCommand,
 			configChangeDisposable
 		);

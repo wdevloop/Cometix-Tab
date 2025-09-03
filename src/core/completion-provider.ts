@@ -10,6 +10,7 @@ import { CompletionContext } from '../types/completion-diff';
 import { smartEditDetector, EditOperation } from '../utils/smart-edit-detector';
 import { completionTracker } from '../utils/completion-tracker';
 import { CompletionStateMachine } from './completion-state-machine';
+import { ContinuationManager } from './continuation-manager';
 import { isFeatureEnabled } from '../utils/feature-flags';
 
 export class CursorCompletionProvider implements vscode.InlineCompletionItemProvider {
@@ -33,6 +34,10 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
   
   // 🔄 状态机（可选）
   private stateMachine: CompletionStateMachine | null = null;
+  // 当前活动的处理器ID
+  private currentHandlerId: string | null = null;
+  // 🔄 续写管理器
+  private continuationManager: ContinuationManager;
   
   constructor(apiClient: CursorApiClient, fileManager: FileManager) {
     this.logger = Logger.getInstance();
@@ -40,11 +45,20 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     this.fileManager = fileManager;
     this.smartDiffer = SmartCompletionDiffer.getInstance();
     
+    // 🔄 初始化续写管理器
+    this.continuationManager = new ContinuationManager();
+    this.logger.info('🔄 续写管理器已启用');
+    
     // 🔄 初始化状态机（如果启用）
     const config = ConfigManager.getConfig();
     if (isFeatureEnabled(config, 'newStateMachine')) {
       this.stateMachine = new CompletionStateMachine();
       this.logger.info('🔄 状态机已启用');
+      
+      // 监听状态变化
+      this.stateMachine.onChange((from, to) => {
+        this.logger.debug(`🔄 状态变化: ${from} -> ${to}`);
+      });
     }
     
     // 🔧 设置文档变化监听器用于智能编辑检测
@@ -71,15 +85,17 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       return undefined;
     }
     
-    // 🧪 检查是否为测试模式调用（通过context中的requestUuid判断）
+    // 🧪 检查是否为测试模式或强制触发调用
     const isTestMode = (context as any).requestUuid === 'test-uuid';
+    const isForceTrigger = (context as any).requestUuid === 'force-trigger';
     
-    if (isTestMode) {
-      this.logger.info('🧪 检测到测试模式调用，直接执行补全');
+    if (isTestMode || isForceTrigger) {
+      const mode = isTestMode ? '🧪 测试模式' : '🚀 强制触发模式';
+      this.logger.info(`${mode}调用，直接执行补全`);
       try {
-        return await this.executeCompletion(document, position, context, token, true);
+        return await this.executeCompletion(document, position, context, token, true, null);
       } catch (error) {
-        this.logger.error('❌ 测试模式代码补全执行失败', error as Error);
+        this.logger.error(`❌ ${mode}代码补全执行失败`, error as Error);
         return undefined;
       }
     }
@@ -108,8 +124,26 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       
       // 设置自适应防抖延迟
       this.debounceTimer = setTimeout(async () => {
+        // 🔄 状态机：开始生成（如果启用）
+        let handlerId: string | null = null;
+        if (this.stateMachine) {
+          handlerId = this.stateMachine.createHandler(
+            { line: position.line, character: position.character },
+            this.abortController || undefined
+          );
+          
+          if (handlerId) {
+            this.currentHandlerId = handlerId;
+            this.stateMachine.beginGenerate(handlerId, 'user_trigger');
+          } else {
+            this.logger.warn('🚫 无法创建补全处理器，可能达到并发限制');
+            resolve(undefined);
+            return;
+          }
+        }
+        
         try {
-          const result = await this.executeCompletion(document, position, context, token, false);
+          const result = await this.executeCompletion(document, position, context, token, false, handlerId);
           
           // 记录补全性能指标
           const responseTime = Date.now() - triggerStartTime;
@@ -158,6 +192,11 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         } catch (error) {
           this.logger.error('❌ 代码补全执行失败', error as Error);
           
+          // 🔄 状态机：处理错误
+          if (this.stateMachine && handlerId) {
+            this.stateMachine.handleError(error as Error, handlerId);
+          }
+          
           // 记录失败的指标
           const responseTime = Date.now() - triggerStartTime;
           smartEditDetector.recordCompletionMetrics(document, responseTime, false);
@@ -173,17 +212,17 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     position: vscode.Position,
     context: vscode.InlineCompletionContext,
     token: vscode.CancellationToken,
-    isTestMode: boolean = false
+    isTestMode: boolean = false,
+    handlerId?: string | null
   ): Promise<vscode.InlineCompletionItem[] | vscode.InlineCompletionList | undefined> {
     try {
-      this.logger.debug(`🔍 触发代码补全 - 文件: ${document.fileName}, 位置: ${position.line}:${position.character}`);
-      
-      // 🔄 状态机：开始生成
-      this.stateMachine?.beginGenerate();
+      this.logger.debug(`🔍 触发代码补全 - 文件: ${document.fileName}, 位置: ${position.line}:${position.character}${handlerId ? `, Handler: ${handlerId}` : ''}`);
       
       // 检查是否应该触发补全（测试模式跳过检查）
       if (!isTestMode && !this.shouldTriggerCompletionBasic(document, position)) {
-        this.stateMachine?.backToIdle();
+        if (this.stateMachine && handlerId) {
+          this.stateMachine.backToIdle(handlerId, 'should_not_trigger');
+        }
         return undefined;
       }
       
@@ -192,7 +231,9 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       const timeSinceLastRequest = now - this.lastRequestTime;
       if (!isTestMode && timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
         this.logger.debug(`⏰ 请求过于频繁，跳过 (间隔: ${timeSinceLastRequest}ms < ${this.MIN_REQUEST_INTERVAL}ms)`);
-        this.stateMachine?.backToIdle();
+        if (this.stateMachine && handlerId) {
+          this.stateMachine.backToIdle(handlerId, 'rate_limit');
+        }
         return undefined;
       }
       
@@ -336,6 +377,17 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       
       const item = new vscode.InlineCompletionItem(insertText, range);
       
+      // 🎯 绑定完成处理器和补全项
+      if (completion.bindingId && handlerId && this.stateMachine) {
+        this.stateMachine.updateHandlerActivity(handlerId, completion.bindingId);
+        
+        // 将bindingId存储在补全项中，用于后续回调
+        (item as any).bindingId = completion.bindingId;
+        (item as any).handlerId = handlerId;
+        
+        this.logger.debug(`🔗 补全项已绑定: Handler=${handlerId}, Binding=${completion.bindingId}`);
+      }
+      
       // 🎯 处理光标预测位置（根据API响应日志优化）
       if (completion.cursorPosition) {
         const targetLine = completion.cursorPosition.line;
@@ -464,21 +516,22 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         this.cleanupExpiredBindings();
       }
       
-      // 🔄 状态机：显示补全
-      this.stateMachine?.showVisible();
-      
       // 返回补全项数组
       return [completionItem];
       
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         this.logger.debug('🛑 补全请求被取消');
-        this.stateMachine?.backToIdle();
+        if (this.stateMachine && handlerId) {
+          this.stateMachine.backToIdle(handlerId, 'cancelled');
+        }
         return undefined;
       }
       
       this.logger.error('❌ 代码补全失败', error as Error);
-      this.stateMachine?.backToIdle();
+      if (this.stateMachine && handlerId) {
+        this.stateMachine.handleError(error as Error, handlerId);
+      }
       return undefined;
     }
   }
@@ -1183,11 +1236,20 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     this.logger.info(item.insertText.toString());
     
     // 🔄 状态机：补全已显示
-    this.stateMachine?.showVisible();
+    const handlerId = (item as any).handlerId;
+    const bindingId = (item as any).bindingId;
+    
+    if (this.stateMachine && handlerId) {
+      this.stateMachine.showVisible(handlerId, bindingId);
+    }
     
     // 记录显示事件，用于调试
     if (item.range) {
       this.logger.info(`   📍 显示范围: ${item.range.start.line}:${item.range.start.character} → ${item.range.end.line}:${item.range.end.character}`);
+    }
+    
+    if (handlerId) {
+      this.logger.debug(`   🔗 Handler: ${handlerId}${bindingId ? `, Binding: ${bindingId}` : ''}`);
     }
   }
 
@@ -1206,46 +1268,67 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     this.logger.info(`   🔄 触发类型: ${info.kind}`);
     
     // 🔄 状态机：开始编辑
-    this.stateMachine?.startEditing();
-    // 递进建议（受 feature flag 控制）
+    const handlerId = (item as any).handlerId;
+    if (this.stateMachine && handlerId) {
+      this.stateMachine.startEditing(handlerId);
+    }
+    
+    // 🔄 使用新的续写管理器
     try {
-      const config = ConfigManager.getConfig();
-      const features = (config as any).features || {};
-      if (features.continuationGeneration === true) {
-        // 智能续写策略
-        const accepted = info.acceptedLength || 0;
-        const total = item.insertText.toString().length || 1;
-        const ratio = accepted / total;
-        const acceptedText = item.insertText.toString().substring(0, accepted);
+      // 获取活动编辑器和文档
+      const activeEditor = vscode.window.activeTextEditor;
+      if (!activeEditor) {
+        this.logger.debug('🚫 无活动编辑器，跳过续写检查');
+        return;
+      }
+      
+      const document = activeEditor.document;
+      
+      // 获取原始请求上下文（如果可用）
+      const originalRequest = (item as any).originalRequest;
+      
+      // 评估是否应该触发续写
+      const continuationResult = this.continuationManager.shouldTriggerContinuation(
+        item, 
+        info, 
+        document, 
+        originalRequest
+      );
+      
+      if (continuationResult.shouldTrigger && continuationResult.strategy) {
+        this.logger.info(`🔄 续写管理器触发续写: 策略=${continuationResult.strategy.name}`);
         
-        // 续写条件：
-        // 1. 接受比例 > 60%
-        // 2. 接受的内容以完整的词/语句结束
-        // 3. 不是只接受了空白字符
-        const shouldTrigger = ratio > 0.6 && 
-                             acceptedText.trim().length > 5 &&
-                             (acceptedText.endsWith(' ') || 
-                              acceptedText.endsWith(';') || 
-                              acceptedText.endsWith(',') ||
-                              acceptedText.endsWith('\n') ||
-                              acceptedText.match(/\w$/)); // 以单词字符结束
+        // 构建续写请求
+        const context = {
+          originalRequest: originalRequest || this.buildDefaultRequest(document, activeEditor.selection.active),
+          acceptedText: item.insertText.toString().substring(0, info.acceptedLength || 0),
+          acceptedLength: info.acceptedLength || 0,
+          acceptedRatio: (info.acceptedLength || 0) / item.insertText.toString().length,
+          triggerType: info.kind || 'unknown',
+          position: activeEditor.selection.active,
+          document,
+          timestamp: Date.now()
+        };
         
-        if (shouldTrigger) {
-          this.logger.info(`🔄 触发续写: ratio=${ratio.toFixed(2)}, accepted="${acceptedText.slice(-20)}"`);
-          // 延迟触发以确保编辑器状态稳定
-          setTimeout(() => {
-            void vscode.commands.executeCommand('cometix-tab.triggerContinuation', { 
-              ratio, 
-              acceptedLength: accepted,
-              triggerType: info.kind 
-            });
-          }, 150);
-        } else {
-          this.logger.debug(`🚫 不触发续写: ratio=${ratio.toFixed(2)}, conditions not met`);
-        }
+        const continuationRequest = this.continuationManager.buildContinuationRequest(
+          context,
+          continuationResult.strategy
+        );
+        
+        // 记录续写触发
+        this.continuationManager.recordContinuationTrigger(document);
+        
+        // 延迟触发续写以确保编辑器状态稳定
+        const delay = continuationResult.delay || 150;
+        setTimeout(async () => {
+          await this.triggerContinuation(continuationRequest, document, activeEditor.selection.active);
+        }, delay);
+        
+      } else {
+        this.logger.debug('🚫 续写管理器决定不触发续写');
       }
     } catch (e) {
-      this.logger.warn('续写触发失败', e as Error);
+      this.logger.warn('续写管理器处理失败', e as Error);
     }
   }
 
@@ -1257,6 +1340,12 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     this.logger.info('✅ 用户完全接受了内联补全建议');
     this.logger.info('   📝 完全接受的内容:');
     this.logger.info(item.insertText.toString());
+    
+    // 🔄 状态机：完成接受，回到空闲
+    const handlerId = (item as any).handlerId;
+    if (this.stateMachine && handlerId) {
+      this.stateMachine.backToIdle(handlerId, 'accepted');
+    }
     
     // 🎯 记录补全接受结果
     this.recordCompletionFate(item, 'accept');
@@ -1402,6 +1491,124 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     } catch (error) {
       this.logger.error('❌ 记录补全结果时发生错误', error as Error);
     }
+  }
+
+  /**
+   * 构建默认补全请求
+   */
+  private buildDefaultRequest(document: vscode.TextDocument, position: vscode.Position): CompletionRequest {
+    return {
+      currentFile: {
+        path: vscode.workspace.asRelativePath(document.uri),
+        content: document.getText(),
+        sha256: '' // 将由API客户端计算
+      },
+      cursorPosition: {
+        line: position.line,
+        column: position.character
+      }
+    };
+  }
+
+  /**
+   * 触发续写补全
+   */
+  private async triggerContinuation(
+    request: CompletionRequest,
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): Promise<void> {
+    try {
+      this.logger.info(`🔄 触发续写补全 - 位置: ${position.line}:${position.character}`);
+      
+      // 创建新的中止控制器
+      const continuationAbortController = new AbortController();
+      
+      // 🔄 状态机：创建续写处理器
+      let continuationHandlerId: string | null = null;
+      if (this.stateMachine) {
+        continuationHandlerId = this.stateMachine.createHandler(
+          { line: position.line, character: position.character },
+          continuationAbortController
+        );
+        
+        if (continuationHandlerId) {
+          this.stateMachine.beginGenerate(continuationHandlerId, 'continuation');
+        } else {
+          this.logger.warn('🚫 无法创建续写处理器，可能达到并发限制');
+          return;
+        }
+      }
+      
+      // 请求续写补全
+      const messageStream = await this.apiClient.requestCompletion(request, continuationAbortController.signal);
+      if (!messageStream) {
+        this.logger.warn('⚠️  续写请求返回null');
+        if (this.stateMachine && continuationHandlerId) {
+          this.stateMachine.backToIdle(continuationHandlerId, 'no_response');
+        }
+        return;
+      }
+      
+      // 解析续写响应
+      const completion = await this.parseMessageStream(messageStream, continuationAbortController.signal);
+      if (!completion || !completion.text) {
+        this.logger.debug('📭 续写未获得有效内容');
+        if (this.stateMachine && continuationHandlerId) {
+          this.stateMachine.backToIdle(continuationHandlerId, 'no_content');
+        }
+        return;
+      }
+      
+      this.logger.info(`✅ 续写成功: ${completion.text.length} 字符`);
+      
+      // 创建续写补全项
+      const insertText = completion.text;
+      const range = new vscode.Range(position, position);
+      const continuationItem = new vscode.InlineCompletionItem(insertText, range);
+      
+      // 绑定处理器信息
+      if (completion.bindingId && continuationHandlerId && this.stateMachine) {
+        this.stateMachine.updateHandlerActivity(continuationHandlerId, completion.bindingId);
+        (continuationItem as any).bindingId = completion.bindingId;
+        (continuationItem as any).handlerId = continuationHandlerId;
+        (continuationItem as any).isContinuation = true;
+      }
+      
+      // 显示续写补全（通过命令触发）
+      await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+      
+    } catch (error) {
+      this.logger.error('❌ 续写补全失败', error as Error);
+      // Note: continuationHandlerId may be null if state machine is disabled
+    }
+  }
+
+  /**
+   * 清理资源
+   */
+  dispose(): void {
+    // 取消所有活动的补全处理器
+    if (this.stateMachine) {
+      this.stateMachine.cancelAll();
+    }
+    
+    // 取消当前请求
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    
+    // 清理定时器
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+    }
+    
+    // 清理文档监听器
+    if (this.documentChangeListener) {
+      this.documentChangeListener.dispose();
+    }
+    
+    this.logger.debug('🧹 CompletionProvider 资源已清理');
   }
 
 }

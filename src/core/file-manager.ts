@@ -5,6 +5,8 @@ import { CryptoUtils } from '../utils/crypto';
 import { Logger } from '../utils/logger';
 import { CursorApiClient } from './api-client';
 import { smartEditDetector } from '../utils/smart-edit-detector';
+import { ContextScorer, ContextItem } from '../utils/context-scorer';
+import { ContextItemCacheManager } from '../utils/context-cache-manager';
 
 export class FileManager {
   private logger: Logger;
@@ -12,14 +14,24 @@ export class FileManager {
   private syncedFiles = new Map<string, FileInfo>();
   private debounceTimers = new Map<string, NodeJS.Timeout>();
   private debounceMs: number;
-  // 🚀 性能优化：添加上下文缓存
+  // 🚀 性能优化：添加上下文缓存（已弃用，使用新的缓存管理器）
   private contextCache = new Map<string, { files: FileInfo[]; timestamp: number }>();
   private readonly CONTEXT_CACHE_TTL = 5000; // 5秒缓存
+  
+  // 🧠 新的智能上下文系统
+  private contextScorer: ContextScorer;
+  private cacheManager: ContextItemCacheManager;
   
   constructor(apiClient: CursorApiClient, debounceMs: number = 300) {
     this.logger = Logger.getInstance();
     this.apiClient = apiClient;
     this.debounceMs = debounceMs;
+    
+    // 初始化新的上下文系统
+    this.contextScorer = new ContextScorer();
+    this.cacheManager = new ContextItemCacheManager();
+    
+    this.logger.info('🧠 智能上下文系统已初始化');
   }
   
   updateConfig(debounceMs: number): void {
@@ -199,82 +211,88 @@ export class FileManager {
   /**
    * 获取多文件上下文 - 为代码补全提供相关文件内容
    * 这是提升代码补全质量的关键功能
+   * 
+   * 🧠 新版本：使用智能上下文评分和缓存管理器
    */
   async getMultiFileContext(currentDocument: vscode.TextDocument, maxFiles: number = 10): Promise<FileInfo[]> {
+    return this.getIntelligentMultiFileContext(currentDocument, maxFiles);
+  }
+
+  /**
+   * 智能多文件上下文获取（新版本）
+   */
+  private async getIntelligentMultiFileContext(currentDocument: vscode.TextDocument, maxFiles: number = 10): Promise<FileInfo[]> {
     try {
       const currentPath = vscode.workspace.asRelativePath(currentDocument.uri);
-      
-      // 🚀 性能优化：检查缓存
       const cacheKey = `${currentPath}:${maxFiles}`;
-      const cached = this.contextCache.get(cacheKey);
-      if (cached && (Date.now() - cached.timestamp) < this.CONTEXT_CACHE_TTL) {
-        this.logger.info(`⚡ 使用缓存的多文件上下文: ${cached.files.length} 个文件`);
-        return cached.files;
+      
+      // 🧠 检查智能缓存
+      const cachedItems = this.cacheManager.getCachedMultiFileContext(cacheKey);
+      if (cachedItems) {
+        this.logger.info(`⚡ 使用智能缓存的多文件上下文: ${Object.keys(cachedItems).length} 个文件`);
+        
+        // 转换为 FileInfo[] 格式
+        const fileInfos: FileInfo[] = [];
+        for (const [filePath, contextItems] of Object.entries(cachedItems)) {
+          // 假设第一个上下文项包含完整文件内容
+          if (contextItems.length > 0) {
+            fileInfos.push({
+              path: filePath,
+              content: contextItems[0].content,
+              sha256: CryptoUtils.calculateSHA256(contextItems[0].content)
+            });
+          }
+        }
+        return fileInfos;
       }
       
-      this.logger.info(`🔍 获取多文件上下文，当前文件: ${currentDocument.fileName}`);
+      this.logger.info(`🧠 智能多文件上下文获取，当前文件: ${currentDocument.fileName}`);
       
-      const contextFiles: FileInfo[] = [];
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(currentDocument.uri);
-      
       if (!workspaceFolder) {
         this.logger.warn('无法确定工作区文件夹，使用当前文件作为唯一上下文');
         return [await this.getCurrentFileInfo(currentDocument)];
       }
 
-      // 1. 添加当前文件
-      contextFiles.push(await this.getCurrentFileInfo(currentDocument));
+      // 🧠 步骤1：收集候选文件
+      const candidateFiles = await this.collectCandidateFiles(currentDocument, workspaceFolder);
+      this.logger.info(`🔍 收集到 ${candidateFiles.length} 个候选文件`);
 
-      // 🚀 基于 LSP 的智能上下文收集策略
-      // 2. 使用 LSP 获取相关文件（最准确的方法）
-      const lspRelatedFiles = await this.findLSPRelatedFiles(currentDocument, maxFiles - 1);
-      contextFiles.push(...lspRelatedFiles);
-      this.logger.info(`🔍 LSP 找到 ${lspRelatedFiles.length} 个相关文件`);
+      // 🧠 步骤2：智能评分
+      const scoredItems = await this.scoreContextCandidates(
+        candidateFiles,
+        currentDocument,
+        vscode.window.activeTextEditor?.selection.active || new vscode.Position(0, 0)
+      );
 
-      // 3. 回退策略：如果 LSP 没有返回足够的文件，使用基础方法补充
-      if (contextFiles.length < maxFiles) {
-        const remainingSlots = maxFiles - contextFiles.length;
-        this.logger.info(`📈 需要更多文件，剩余槽位: ${remainingSlots}`);
-        
-        // 获取同目录下的相关文件
-        const currentDir = path.dirname(currentDocument.uri.fsPath);
-        const sameDirectoryFiles = await this.findRelevantFilesInDirectory(currentDir, currentPath, Math.min(3, remainingSlots));
-        contextFiles.push(...sameDirectoryFiles);
-        this.logger.info(`📁 同目录找到 ${sameDirectoryFiles.length} 个文件`);
+      // 🧠 步骤3：选择最佳文件
+      const selectedItems = this.selectBestContextItems(scoredItems, maxFiles);
+      this.logger.info(`🎯 智能选择了 ${selectedItems.length} 个最相关的文件`);
 
-        // 获取重要的配置文件
-        if (contextFiles.length < maxFiles) {
-          const configFiles = await this.findConfigFiles(workspaceFolder.uri.fsPath, currentPath);
-          const addedConfigFiles = configFiles.slice(0, maxFiles - contextFiles.length);
-          contextFiles.push(...addedConfigFiles);
-          this.logger.info(`⚙️ 配置文件找到 ${addedConfigFiles.length} 个文件`);
-        }
+      // 🧠 步骤4：转换为 FileInfo 格式
+      const resultFiles: FileInfo[] = [];
+      const contextMap: { [filePath: string]: ContextItem[] } = {};
+
+      for (const item of selectedItems) {
+        const fileInfo: FileInfo = {
+          path: item.filePath,
+          content: item.content,
+          sha256: CryptoUtils.calculateSHA256(item.content)
+        };
+        resultFiles.push(fileInfo);
+        contextMap[item.filePath] = [item];
       }
 
-      // 🔧 确保至少有一些其他文件（除了当前文件）
-      if (contextFiles.length <= 1) {
-        this.logger.warn(`⚠️ 上下文文件太少 (${contextFiles.length})，尝试宽松搜索...`);
-        const looseSearch = await this.findRelevantFilesLoose(workspaceFolder.uri.fsPath, currentPath, 3);
-        contextFiles.push(...looseSearch);
-        this.logger.info(`🔍 宽松搜索添加 ${looseSearch.length} 个文件`);
-      }
+      // 🧠 步骤5：缓存结果
+      this.cacheManager.cacheMultiFileContext(cacheKey, contextMap);
 
-      // 5. 去重并限制数量
-      const uniqueFiles = this.deduplicateFiles(contextFiles);
-      const limitedFiles = uniqueFiles.slice(0, maxFiles);
-
-      this.logger.info(`✅ 收集到 ${limitedFiles.length} 个上下文文件:`);
-      limitedFiles.forEach(file => {
-        this.logger.info(`   📄 ${file.path} (${file.content.length} 字符)`);
+      this.logger.info(`✅ 智能上下文系统完成，返回 ${resultFiles.length} 个文件:`);
+      resultFiles.forEach((file, index) => {
+        const contextItem = selectedItems[index];
+        this.logger.info(`   📄 ${file.path} (评分: ${contextItem.score.toFixed(3)}, 原因: ${contextItem.reason})`);
       });
 
-      // 🚀 性能优化：缓存结果
-      this.contextCache.set(cacheKey, {
-        files: limitedFiles,
-        timestamp: Date.now()
-      });
-
-      return limitedFiles;
+      return resultFiles;
       
     } catch (error) {
       this.logger.error('获取多文件上下文失败', error as Error);
@@ -590,6 +608,161 @@ export class FileManager {
     return result;
   }
 
+  /**
+   * 🧠 收集候选文件
+   */
+  private async collectCandidateFiles(
+    currentDocument: vscode.TextDocument,
+    workspaceFolder: vscode.WorkspaceFolder
+  ): Promise<{ filePath: string; content: string }[]> {
+    const candidates: { filePath: string; content: string }[] = [];
+    const currentPath = vscode.workspace.asRelativePath(currentDocument.uri);
+
+    try {
+      // 1. 添加当前文件
+      candidates.push({
+        filePath: currentPath,
+        content: currentDocument.getText()
+      });
+
+      // 2. LSP 相关文件
+      const lspFiles = await this.findLSPRelatedFiles(currentDocument, 20);
+      for (const file of lspFiles) {
+        candidates.push({
+          filePath: file.path,
+          content: file.content
+        });
+      }
+
+      // 3. 同目录文件
+      const currentDir = path.dirname(currentDocument.uri.fsPath);
+      const sameDirectoryFiles = await this.findRelevantFilesInDirectory(currentDir, currentPath, 10);
+      for (const file of sameDirectoryFiles) {
+        candidates.push({
+          filePath: file.path,
+          content: file.content
+        });
+      }
+
+      // 4. 配置文件
+      const configFiles = await this.findConfigFiles(workspaceFolder.uri.fsPath, currentPath);
+      for (const file of configFiles) {
+        candidates.push({
+          filePath: file.path,
+          content: file.content
+        });
+      }
+
+      // 5. 宽松搜索（如果候选文件不够）
+      if (candidates.length < 15) {
+        const looseFiles = await this.findRelevantFilesLoose(workspaceFolder.uri.fsPath, currentPath, 10);
+        for (const file of looseFiles) {
+          candidates.push({
+            filePath: file.path,
+            content: file.content
+          });
+        }
+      }
+
+      // 去重
+      const seen = new Set<string>();
+      const uniqueCandidates = candidates.filter(candidate => {
+        if (seen.has(candidate.filePath)) {
+          return false;
+        }
+        seen.add(candidate.filePath);
+        return true;
+      });
+
+      return uniqueCandidates;
+    } catch (error) {
+      this.logger.error('收集候选文件失败', error as Error);
+      return candidates;
+    }
+  }
+
+  /**
+   * 🧠 为候选文件评分
+   */
+  private async scoreContextCandidates(
+    candidates: { filePath: string; content: string }[],
+    currentDocument: vscode.TextDocument,
+    currentPosition: vscode.Position
+  ): Promise<ContextItem[]> {
+    const currentPath = vscode.workspace.asRelativePath(currentDocument.uri);
+    const scoredItems: ContextItem[] = [];
+
+    for (const candidate of candidates) {
+      try {
+        const contextItem = this.contextScorer.scoreContextItem(
+          candidate,
+          currentPath,
+          currentPosition,
+          currentDocument
+        );
+        scoredItems.push(contextItem);
+      } catch (error) {
+        this.logger.debug(`评分失败: ${candidate.filePath}`, error as Error);
+      }
+    }
+
+    // 按分数降序排序
+    scoredItems.sort((a, b) => b.score - a.score);
+
+    return scoredItems;
+  }
+
+  /**
+   * 🧠 选择最佳上下文项
+   */
+  private selectBestContextItems(scoredItems: ContextItem[], maxFiles: number): ContextItem[] {
+    // 确保当前文件总是包含在内（分数最高的通常是当前文件）
+    const currentFileItem = scoredItems.find(item => item.score >= 0.9);
+    const otherItems = scoredItems.filter(item => item.score < 0.9);
+
+    const selectedItems: ContextItem[] = [];
+    
+    // 添加当前文件
+    if (currentFileItem) {
+      selectedItems.push(currentFileItem);
+    }
+
+    // 智能选择其他文件
+    const remainingSlots = maxFiles - selectedItems.length;
+    
+    // 按分数分层选择
+    const highScoreItems = otherItems.filter(item => item.score >= 0.7);
+    const mediumScoreItems = otherItems.filter(item => item.score >= 0.4 && item.score < 0.7);
+    const lowScoreItems = otherItems.filter(item => item.score < 0.4);
+
+    // 优先选择高分文件
+    let slotsUsed = 0;
+    for (const item of highScoreItems) {
+      if (slotsUsed >= remainingSlots) break;
+      selectedItems.push(item);
+      slotsUsed++;
+    }
+
+    // 补充中等分数文件
+    for (const item of mediumScoreItems) {
+      if (slotsUsed >= remainingSlots) break;
+      selectedItems.push(item);
+      slotsUsed++;
+    }
+
+    // 如果还有空位，添加一些低分文件（保证多样性）
+    for (const item of lowScoreItems) {
+      if (slotsUsed >= remainingSlots) break;
+      selectedItems.push(item);
+      slotsUsed++;
+    }
+
+    return selectedItems;
+  }
+
+  /**
+   * 清理资源
+   */
   dispose(): void {
     // 清理所有定时器
     for (const timer of this.debounceTimers.values()) {
@@ -597,6 +770,15 @@ export class FileManager {
     }
     this.debounceTimers.clear();
     this.syncedFiles.clear();
-    this.logger.info('File manager disposed');
+    
+    // 清理智能上下文系统
+    if (this.cacheManager) {
+      this.cacheManager.dispose();
+    }
+    if (this.contextScorer) {
+      this.contextScorer.cleanup();
+    }
+    
+    this.logger.info('🧠 智能文件管理器已清理');
   }
 }
