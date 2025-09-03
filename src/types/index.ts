@@ -6,6 +6,13 @@ export interface TriggerConfig {
   customTriggerChars: string[];
 }
 
+// Feature flags 配置
+export interface FeatureFlagsConfig {
+  newStateMachine?: boolean;
+  enhancedProposedAPI?: boolean;
+  continuationGeneration?: boolean;
+}
+
 export interface CursorConfig {
   enabled: boolean;
   serverUrl: string;
@@ -18,6 +25,7 @@ export interface CursorConfig {
   debounceMs: number;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   triggerConfig: TriggerConfig;
+  features?: FeatureFlagsConfig;
 }
 
 export interface FileInfo {
@@ -119,3 +127,13 @@ export interface FSSyncFileRequestData {
 export interface FSSyncFileResponseData {
   error: number;
 }
+
+// 补全状态机相关类型
+export enum CompletionState {
+  IDLE = 'idle',
+  GENERATING = 'generating',
+  VISIBLE = 'visible', 
+  EDITING = 'editing',
+}
+
+export type StateChangeListener = (from: CompletionState, to: CompletionState) => void;
