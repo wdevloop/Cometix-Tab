@@ -7,6 +7,8 @@ import { ConnectRpcApiClient } from './core/connect-rpc-api-client';
 import { ConnectRpcAdapter } from './adapters/connect-rpc-adapter';
 import { FileManager } from './core/file-manager';
 import { CursorCompletionProvider } from './core/completion-provider';
+import { CompletionStateMachine } from './core/completion-state-machine';
+import { isFeatureEnabled } from './utils/feature-flags';
 import { StatusBar } from './ui/status-bar';
 import { StatusIntegration } from './core/status-integration';
 import { ConfigValidator } from './utils/config-validator';
@@ -114,6 +116,13 @@ export async function activate(context: vscode.ExtensionContext) {
 		
 		// 使用 Connect RPC 适配器
 		completionProvider = new CursorCompletionProvider(connectRpcAdapter as any, fileManager);
+
+		// 可选：初始化状态机（特性开关控制）
+		const useNewStateMachine = isFeatureEnabled(ConfigManager.getConfig(), 'newStateMachine');
+		if (useNewStateMachine) {
+			const sm = new CompletionStateMachine();
+			(completionProvider as any).__stateMachine = sm;
+		}
 		
 		// 注册补全提供者
 		const completionProviderDisposable = vscode.languages.registerInlineCompletionItemProvider(
@@ -345,6 +354,17 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 		});
 		
+		// 注册续写命令（用于部分接受后触发续写）
+		const triggerContinuationCommand = vscode.commands.registerCommand('cometix-tab.triggerContinuation', async (args?: any) => {
+			try {
+				const editor = vscode.window.activeTextEditor;
+				if (!editor) return;
+				await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+			} catch (e) {
+				logger.error('triggerContinuation failed', e as Error);
+			}
+		});
+
 		// 监听配置变化
 		const configChangeDisposable = ConfigManager.onConfigChange(() => {
 			const newConfig = ConfigManager.getConfig();
@@ -379,6 +399,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			refreshConfigCommand,
 			testConnectionCommand,
 			manualTriggerCompletionCommand,
+			triggerContinuationCommand,
 			configChangeDisposable
 		);
 		

@@ -106,6 +106,11 @@
         "command": "cometix-tab.manualTriggerCompletion",
         "title": "Manual Trigger Code Completion",
         "category": "Cometix Tab"
+      },
+      {
+        "command": "cometix-tab.triggerContinuation",
+        "title": "Trigger Continuation",
+        "category": "Cometix Tab"
       }
     ],
     "keybindings": [
@@ -243,6 +248,32 @@
           },
           "default": [],
           "description": "Enabled heuristics for code completion (from server config)"
+        },
+        "cometixTab.features": {
+          "type": "object",
+          "properties": {
+            "newStateMachine": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable new completion state machine integration"
+            },
+            "enhancedProposedAPI": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable proposed API callbacks and inline edit"
+            },
+            "continuationGeneration": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable partial-accept continuation flow"
+            }
+          },
+          "default": {
+            "newStateMachine": false,
+            "enhancedProposedAPI": true,
+            "continuationGeneration": false
+          },
+          "description": "Feature flags for progressive rollout"
         },
         "cometixTab.triggerConfig": {
           "type": "object",

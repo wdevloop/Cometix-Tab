@@ -223,8 +223,13 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       
       // 获取多文件上下文 - 增强上下文收集以提升补全质量
       this.logger.info('🔍 开始收集多文件上下文...');
-      const additionalFiles = await this.fileManager.getMultiFileContext(document, 8); // 增加到8个文件以提升质量
-      this.logger.info(`📚 收集到 ${additionalFiles.length} 个上下文文件`);
+      const allContextFiles = await this.fileManager.getMultiFileContext(document, 8); // 增加到8个文件以提升质量
+      this.logger.info(`📚 收集到 ${allContextFiles.length} 个上下文文件`);
+
+      // 🔧 修复：安全地排除当前文件
+      const currentFilePath = vscode.workspace.asRelativePath(document.uri);
+      const additionalFiles = allContextFiles.filter(file => file.path !== currentFilePath);
+      this.logger.info(`📋 过滤后的附加文件数: ${additionalFiles.length} (排除当前文件: ${currentFilePath})`);
 
       // 构建补全请求
       const request: CompletionRequest = {
@@ -237,7 +242,7 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         modelName: 'auto', // TODO: 从配置中获取
         debugOutput: true, // 开启调试输出
         // 多文件上下文支持 - 显著提升补全质量
-        additionalFiles: additionalFiles.slice(1) // 排除当前文件（已在currentFile中）
+        additionalFiles: additionalFiles
       };
       
       this.logger.debug(`🚀 准备发送补全请求`);

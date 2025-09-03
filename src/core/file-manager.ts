@@ -229,21 +229,34 @@ export class FileManager {
       // 2. 使用 LSP 获取相关文件（最准确的方法）
       const lspRelatedFiles = await this.findLSPRelatedFiles(currentDocument, maxFiles - 1);
       contextFiles.push(...lspRelatedFiles);
+      this.logger.info(`🔍 LSP 找到 ${lspRelatedFiles.length} 个相关文件`);
 
       // 3. 回退策略：如果 LSP 没有返回足够的文件，使用基础方法补充
       if (contextFiles.length < maxFiles) {
         const remainingSlots = maxFiles - contextFiles.length;
+        this.logger.info(`📈 需要更多文件，剩余槽位: ${remainingSlots}`);
         
         // 获取同目录下的相关文件
         const currentDir = path.dirname(currentDocument.uri.fsPath);
         const sameDirectoryFiles = await this.findRelevantFilesInDirectory(currentDir, currentPath, Math.min(3, remainingSlots));
         contextFiles.push(...sameDirectoryFiles);
+        this.logger.info(`📁 同目录找到 ${sameDirectoryFiles.length} 个文件`);
 
         // 获取重要的配置文件
         if (contextFiles.length < maxFiles) {
           const configFiles = await this.findConfigFiles(workspaceFolder.uri.fsPath, currentPath);
-          contextFiles.push(...configFiles.slice(0, maxFiles - contextFiles.length));
+          const addedConfigFiles = configFiles.slice(0, maxFiles - contextFiles.length);
+          contextFiles.push(...addedConfigFiles);
+          this.logger.info(`⚙️ 配置文件找到 ${addedConfigFiles.length} 个文件`);
         }
+      }
+
+      // 🔧 确保至少有一些其他文件（除了当前文件）
+      if (contextFiles.length <= 1) {
+        this.logger.warn(`⚠️ 上下文文件太少 (${contextFiles.length})，尝试宽松搜索...`);
+        const looseSearch = await this.findRelevantFilesLoose(workspaceFolder.uri.fsPath, currentPath, 3);
+        contextFiles.push(...looseSearch);
+        this.logger.info(`🔍 宽松搜索添加 ${looseSearch.length} 个文件`);
       }
 
       // 5. 去重并限制数量
@@ -530,6 +543,39 @@ export class FileManager {
   /**
    * 去重文件列表
    */
+  /**
+   * 宽松搜索相关文件（最后的回退策略）
+   */
+  private async findRelevantFilesLoose(workspacePath: string, currentPath: string, maxFiles: number): Promise<FileInfo[]> {
+    try {
+      const files: FileInfo[] = [];
+      const currentExt = path.extname(currentPath);
+      
+      // 搜索相同扩展名的文件
+      const pattern = `**/*${currentExt}`;
+      const foundUris = await vscode.workspace.findFiles(pattern, '**/node_modules/**', maxFiles + 5);
+      
+      this.logger.info(`🔍 宽松搜索模式: 在工作区找到 ${foundUris.length} 个 ${currentExt} 文件`);
+      
+      for (const uri of foundUris.slice(0, maxFiles)) {
+        const relativePath = vscode.workspace.asRelativePath(uri);
+        if (relativePath === currentPath) continue; // 跳过当前文件
+        
+        const fileInfo = await this.readFileAsFileInfo(uri.fsPath, relativePath);
+        if (fileInfo && fileInfo.content.length > 50) { // 至少50个字符的文件
+          files.push(fileInfo);
+          if (files.length >= maxFiles) break;
+        }
+      }
+      
+      this.logger.info(`✅ 宽松搜索找到 ${files.length} 个有效文件`);
+      return files;
+    } catch (error) {
+      this.logger.debug('宽松搜索失败', error as Error);
+      return [];
+    }
+  }
+
   private deduplicateFiles(files: FileInfo[]): FileInfo[] {
     const seen = new Set<string>();
     const result: FileInfo[] = [];
