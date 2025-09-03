@@ -139,7 +139,7 @@ export class ContinuationManager {
     };
 
     // 更新文件内容到当前状态
-    continuationRequest.currentFile.contents = context.document.getText();
+    continuationRequest.currentFile.content = context.document.getText();
     
     // 添加续写标记
     (continuationRequest as any).isContinuation = true;
@@ -179,14 +179,19 @@ export class ContinuationManager {
       const acceptedText = item.insertText.toString().substring(0, acceptedLength);
       const lines = acceptedText.split('\n');
       
+      // 当没有range时，假设是从文档末尾开始插入
+      const lastLine = Math.max(0, document.lineCount - 1);
+      const lastLineText = document.lineAt(lastLine).text;
+      const startPosition = new vscode.Position(lastLine, lastLineText.length);
+      
       if (lines.length === 1) {
         // 单行，在同一行添加字符
-        return new vscode.Position(range?.start.line || 0, (range?.start.character || 0) + acceptedLength);
+        return new vscode.Position(startPosition.line, startPosition.character + acceptedLength);
       } else {
         // 多行，计算最后一行的位置
         const lastLineLength = lines[lines.length - 1].length;
         return new vscode.Position(
-          (range?.start.line || 0) + lines.length - 1,
+          startPosition.line + lines.length - 1,
           lastLineLength
         );
       }

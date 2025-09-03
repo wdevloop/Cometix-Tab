@@ -1551,7 +1551,12 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       }
       
       // 解析续写响应
-      const completion = await this.parseMessageStream(messageStream, continuationAbortController.signal);
+      // Convert AbortSignal to CancellationToken-like interface
+      const cancellationToken: vscode.CancellationToken = {
+        isCancellationRequested: continuationAbortController.signal.aborted,
+        onCancellationRequested: new vscode.EventEmitter<any>().event
+      };
+      const completion = await this.parseMessageStream(messageStream, cancellationToken);
       if (!completion || !completion.text) {
         this.logger.debug('📭 续写未获得有效内容');
         if (this.stateMachine && continuationHandlerId) {
