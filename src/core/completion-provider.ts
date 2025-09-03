@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { CompletionRequest, CompletionResponse, SSEEventType } from '../types';
+import type { CompletionRequest, CompletionResponse, SSEEventType, CompletionState } from '../types';
 import { Logger } from '../utils/logger';
 import { ConfigManager } from '../utils/config';
 import { CursorApiClient } from './api-client';
@@ -9,6 +9,8 @@ import { SmartCompletionDiffer } from '../utils/smart-completion-differ';
 import { CompletionContext } from '../types/completion-diff';
 import { smartEditDetector, EditOperation } from '../utils/smart-edit-detector';
 import { completionTracker } from '../utils/completion-tracker';
+import { CompletionStateMachine } from './completion-state-machine';
+import { isFeatureEnabled } from '../utils/feature-flags';
 
 export class CursorCompletionProvider implements vscode.InlineCompletionItemProvider {
   private logger: Logger;
@@ -29,11 +31,21 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
   private completionBindings = new Map<string, { bindingId: string; requestTime: number }>();
   private readonly BINDING_TIMEOUT = 30000; // 30秒后清理过期的绑定
   
+  // 🔄 状态机（可选）
+  private stateMachine: CompletionStateMachine | null = null;
+  
   constructor(apiClient: CursorApiClient, fileManager: FileManager) {
     this.logger = Logger.getInstance();
     this.apiClient = apiClient;
     this.fileManager = fileManager;
     this.smartDiffer = SmartCompletionDiffer.getInstance();
+    
+    // 🔄 初始化状态机（如果启用）
+    const config = ConfigManager.getConfig();
+    if (isFeatureEnabled(config, 'newStateMachine')) {
+      this.stateMachine = new CompletionStateMachine();
+      this.logger.info('🔄 状态机已启用');
+    }
     
     // 🔧 设置文档变化监听器用于智能编辑检测
     this.setupDocumentChangeListener();
@@ -166,8 +178,12 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     try {
       this.logger.debug(`🔍 触发代码补全 - 文件: ${document.fileName}, 位置: ${position.line}:${position.character}`);
       
+      // 🔄 状态机：开始生成
+      this.stateMachine?.beginGenerate();
+      
       // 检查是否应该触发补全（测试模式跳过检查）
       if (!isTestMode && !this.shouldTriggerCompletionBasic(document, position)) {
+        this.stateMachine?.backToIdle();
         return undefined;
       }
       
@@ -176,6 +192,7 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       const timeSinceLastRequest = now - this.lastRequestTime;
       if (!isTestMode && timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
         this.logger.debug(`⏰ 请求过于频繁，跳过 (间隔: ${timeSinceLastRequest}ms < ${this.MIN_REQUEST_INTERVAL}ms)`);
+        this.stateMachine?.backToIdle();
         return undefined;
       }
       
@@ -442,16 +459,21 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         this.cleanupExpiredBindings();
       }
       
+      // 🔄 状态机：显示补全
+      this.stateMachine?.showVisible();
+      
       // 返回补全项数组
       return [completionItem];
       
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         this.logger.debug('🛑 补全请求被取消');
+        this.stateMachine?.backToIdle();
         return undefined;
       }
       
       this.logger.error('❌ 代码补全失败', error as Error);
+      this.stateMachine?.backToIdle();
       return undefined;
     }
   }
@@ -1155,6 +1177,9 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     this.logger.info('   📝 显示的完整内容:');
     this.logger.info(item.insertText.toString());
     
+    // 🔄 状态机：补全已显示
+    this.stateMachine?.showVisible();
+    
     // 记录显示事件，用于调试
     if (item.range) {
       this.logger.info(`   📍 显示范围: ${item.range.start.line}:${item.range.start.character} → ${item.range.end.line}:${item.range.end.character}`);
@@ -1174,8 +1199,26 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     this.logger.info('   📝 部分接受的内容:');
     this.logger.info(item.insertText.toString().substring(0, info.acceptedLength));
     this.logger.info(`   🔄 触发类型: ${info.kind}`);
-    // 这里可以实现 Cursor-like 的递进建议功能
-    // 当用户部分接受时，可以触发下一个建议
+    
+    // 🔄 状态机：开始编辑
+    this.stateMachine?.startEditing();
+    // 递进建议（受 feature flag 控制）
+    try {
+      const config = ConfigManager.getConfig();
+      const features = (config as any).features || {};
+      if (features.continuationGeneration === true) {
+        // 简单策略：若已接受比例 > 0.6，则触发续写
+        const accepted = info.acceptedLength || 0;
+        const total = item.insertText.toString().length || 1;
+        const ratio = accepted / total;
+        if (ratio > 0.6) {
+          this.logger.info(`🔄 触发续写: ratio=${ratio.toFixed(2)}`);
+          void vscode.commands.executeCommand('cometix-tab.triggerContinuation', { ratio });
+        }
+      }
+    } catch (e) {
+      this.logger.warn('续写触发失败', e as Error);
+    }
   }
 
   /**
