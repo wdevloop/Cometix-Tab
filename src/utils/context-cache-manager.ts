@@ -75,7 +75,7 @@ export class ContextCacheManager {
     }
 
     const entry: CacheEntry<T> = {
-      data: this.enableCompression ? this.compress(data) : data,
+      data: this.enableCompression ? this.compress(data) as any : data,
       timestamp: now,
       ttl: effectiveTTL,
       accessCount: 0,
@@ -328,7 +328,7 @@ export class ContextCacheManager {
       try {
         return JSON.parse(compressed);
       } catch {
-        return compressed;
+        return compressed as T;
       }
     }
     return compressed;

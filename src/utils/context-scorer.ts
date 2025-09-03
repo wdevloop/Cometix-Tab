@@ -100,7 +100,7 @@ export class ContextScorer {
       content: item.content,
       score,
       reason,
-      relatedSymbols
+      relatedSymbols: Array.from(relatedSymbols)
     };
   }
 
