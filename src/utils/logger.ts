@@ -11,6 +11,8 @@ export class Logger {
   private static instance: Logger;
   private outputChannel: vscode.OutputChannel;
   private logLevel: LogLevel = LogLevel.INFO;  // 默认为 INFO 级别
+  private isDisposed: boolean = false;
+  private isMuted: boolean = false;
   
   private constructor() {
     this.outputChannel = vscode.window.createOutputChannel('Cometix Tab');
@@ -37,10 +39,19 @@ export class Logger {
     this.logLevel = level;
   }
 
+  mute(): void {
+    this.isMuted = true;
+  }
+
+  unmute(): void {
+    this.isMuted = false;
+  }
+
   /**
    * 从 VSCode 配置中更新日志级别
    */
   private updateLogLevelFromConfig(): void {
+    if (this.isDisposed) { return; }
     const config = vscode.workspace.getConfiguration('cometixTab');
     const logLevelString = config.get<string>('logLevel', 'info');
     
@@ -107,23 +118,38 @@ export class Logger {
   }
   
   private log(level: string, message: string, ...args: any[]): void {
+    if (this.isDisposed || this.isMuted) { return; }
     const timestamp = new Date().toISOString();
     const logMessage = `[${timestamp}] [${level}] ${message}`;
     
-    if (args.length > 0) {
-      this.outputChannel.appendLine(`${logMessage} ${args.map(arg => 
-        typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-      ).join(' ')}`);
-    } else {
-      this.outputChannel.appendLine(logMessage);
+    try {
+      if (args.length > 0) {
+        this.outputChannel.appendLine(`${logMessage} ${args.map(arg => 
+          typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+        ).join(' ')}`);
+      } else {
+        this.outputChannel.appendLine(logMessage);
+      }
+    } catch {
+      // Ignore logging errors during shutdown (e.g., channel closed)
     }
   }
   
   show(): void {
-    this.outputChannel.show();
+    if (this.isDisposed) { return; }
+    try {
+      this.outputChannel.show();
+    } catch {
+      // ignore
+    }
   }
   
   dispose(): void {
-    this.outputChannel.dispose();
+    this.isDisposed = true;
+    try {
+      this.outputChannel.dispose();
+    } catch {
+      // ignore
+    }
   }
 }

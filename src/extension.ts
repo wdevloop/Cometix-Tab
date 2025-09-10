@@ -550,24 +550,23 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-	logger?.info('Deactivating Cometix Tab extension...');
+	// Silence logger and guard disposals to avoid errors when the channel is closed
+	try { (logger as any)?.mute?.(); } catch {}
+
+	try { fileManager?.dispose(); } catch {}
+
+	// Note: statusBar and statusIntegration are disposed via context.subscriptions
+	try {
+		const performanceMonitor = getPerformanceMonitor();
+		performanceMonitor?.dispose();
+	} catch {}
 	
-	// 清理资源
-	fileManager?.dispose();
-	statusBar?.dispose();
-	statusIntegration?.dispose();
+	try {
+		const batchSyncManager = getBatchSyncManager();
+		batchSyncManager?.dispose();
+	} catch {}
 	
-	// 清理性能监控器
-	const performanceMonitor = getPerformanceMonitor();
-	performanceMonitor?.dispose();
-	
-	// 清理批处理管理器
-	const batchSyncManager = getBatchSyncManager();
-	batchSyncManager?.dispose();
-	
-	logger?.dispose();
-	
-	logger?.info('Extension deactivated');
+	try { logger?.dispose(); } catch {}
 }
 
 // updateStatusBar 函数已被 EnhancedStatusBar 替代，不再需要
