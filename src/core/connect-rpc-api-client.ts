@@ -714,7 +714,7 @@ export class ConnectRpcApiClient {
         fileInfo.path,
         oldContent,
         fileInfo.content,
-        newModelVersion
+        currentModelVersion
       );
       
       // 验证差异计算的正确性
@@ -737,7 +737,7 @@ export class ConnectRpcApiClient {
       const syncRequest = new FSSyncFileRequest({
         uuid,
         relativeWorkspacePath: fileInfo.path,
-        modelVersion: newModelVersion, // 🔧 修复：使用新版本而非当前版本
+        modelVersion: currentModelVersion, // 使用当前版本作为基线版本
         filesyncUpdates: [filesyncUpdate],
         sha256Hash: fileInfo.sha256 || ''
       });
