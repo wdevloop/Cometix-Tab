@@ -305,100 +305,48 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       this.logger.info('✅ 获得补全内容:');
       this.logger.info(completion.text);
       
-      // 创建补全项 - 简化范围处理以修复幽灵文本显示问题
+      // 基于 Proposed API：优先使用服务端提供的范围进行多行替换
       let insertText = completion.text;
       let range: vscode.Range;
       
-      // 🔧 CRITICAL FIX: 简化幽灵文本显示逻辑 - 测试是否是范围计算问题
-      this.logger.info(`🧪 调试：测试简化的幽灵文本逻辑`);
-      this.logger.info(`   📍 当前光标位置: ${position.line}:${position.character}`);
-      this.logger.info(`   📄 文档总行数: ${document.lineCount}`);
-      
-      // 🧪 实验性：强制使用插入模式来测试显示
-      if (isTestMode) {
-        this.logger.info(`🧪 测试模式：强制使用简单插入模式`);
-        const simpleItem = new vscode.InlineCompletionItem(completion.text);
-        
-        this.logger.info(`🧪 创建简单插入项:`);
-        this.logger.info('   📝 完整 insertText:');
-        this.logger.info(completion.text);
-        this.logger.info(`   📐 range: undefined (插入模式)`);
-        
-        return [simpleItem];
-      }
-      
-      // 🔧 CRITICAL FIX: VSCode InlineCompletion 限制修复
-      // 根据 VSCode API 文档，InlineCompletion 的 range 有严格限制：
-      // 1. 范围必须在同一行
-      // 2. 范围必须包含当前光标位置
-      // 3. 多行范围替换不被支持
-      
+      // 计算替换范围（若 API 提供）
       if (completion.range && completion.range.startLine !== undefined && completion.range.endLine !== undefined) {
-        this.logger.info(`🔄 API指定范围替换: 行${completion.range.startLine}-${completion.range.endLine}`);
+        const maxLine = Math.max(0, document.lineCount - 1);
+        let startLine = Math.max(0, Math.min(completion.range.startLine, maxLine));
+        let endLine = Math.max(0, Math.min(completion.range.endLine, maxLine));
+        if (endLine < startLine) {
+          endLine = startLine;
+        }
         
-        // 🔧 关键修复：VSCode 支持多行范围替换！使用正确的范围替换
-        this.logger.info(`✅ 实现多行范围替换: 行${completion.range.startLine}-${completion.range.endLine}`);
+        let startPos = new vscode.Position(startLine, 0);
+        let endLineText = document.lineAt(endLine).text;
+        let endPos = new vscode.Position(endLine, endLineText.length);
         
-        // 计算正确的范围
-        const maxLine = document.lineCount - 1;
-        const startLine = Math.max(0, Math.min(completion.range.startLine, maxLine));
-        const endLine = Math.max(startLine, Math.min(completion.range.endLine, maxLine));
-        
-        // 创建正确的范围对象
-        const startPos = new vscode.Position(startLine, 0);
-        let endPos: vscode.Position;
-        
-        if (endLine < document.lineCount) {
-          const lastLine = document.lineAt(endLine);
-          endPos = new vscode.Position(endLine, lastLine.text.length);
-        } else {
-          const lastDocLine = document.lineCount - 1;
-          const lastLineText = document.lineAt(lastDocLine);
-          endPos = new vscode.Position(lastDocLine, lastLineText.text.length);
+        // 确保范围包含当前光标（某些模型可能返回的范围未覆盖光标行，导致幽灵文本不显示）
+        if (position.line < startLine) {
+          startPos = new vscode.Position(position.line, 0);
+        } else if (position.line > endLine) {
+          const posLineText = document.lineAt(position.line).text;
+          endPos = new vscode.Position(position.line, posLineText.length);
         }
         
         range = new vscode.Range(startPos, endPos);
-        
-        this.logger.info(`   📍 多行范围替换: ${startPos.line}:${startPos.character} → ${endPos.line}:${endPos.character}`);
-        this.logger.info(`   📏 替换行数: ${endLine - startLine + 1} 行`);
-        
-        
-        // 🎯 API 已经提供了精确的范围和内容，直接使用即可
-        this.logger.info(`📝 直接使用 API 提供的范围替换内容，无需额外处理`);
+        this.logger.info(`🔄 使用多行范围替换: ${range.start.line}:${range.start.character} → ${range.end.line}:${range.end.character}`);
       } else {
-        // 默认插入模式
-        this.logger.info(`📝 使用插入模式 (无API范围)`);
+        // 回退：插入模式（在光标处插入）
         range = new vscode.Range(position, position);
+        this.logger.info(`📝 无范围信息，回退为插入模式`);
       }
       
-      // 🎯 直接使用 API 提供的补全内容，相信其准确性
-      this.logger.info('📝 使用 API 提供的补全内容:');
-      this.logger.info(insertText);
+      // 创建最终的 InlineCompletionItem（使用 Proposed API 支持的多行 range）
+      const completionItem = new vscode.InlineCompletionItem(insertText, range);
       
-      const item = new vscode.InlineCompletionItem(insertText, range);
-      
-      // 🎯 绑定完成处理器和补全项
+      // 绑定处理器信息（用于后续接受/忽略上报）
       if (completion.bindingId && handlerId && this.stateMachine) {
         this.stateMachine.updateHandlerActivity(handlerId, completion.bindingId);
-        
-        // 将bindingId存储在补全项中，用于后续回调
-        (item as any).bindingId = completion.bindingId;
-        (item as any).handlerId = handlerId;
-        
+        (completionItem as any).bindingId = completion.bindingId;
+        (completionItem as any).handlerId = handlerId;
         this.logger.debug(`🔗 补全项已绑定: Handler=${handlerId}, Binding=${completion.bindingId}`);
-      }
-      
-      // 🎯 处理光标预测位置（根据API响应日志优化）
-      if (completion.cursorPosition) {
-        const targetLine = completion.cursorPosition.line;
-        const targetColumn = completion.cursorPosition.column;
-        
-        this.logger.info(`🎯 检测到光标预测位置: 行${targetLine}, 列${targetColumn}`);
-        
-        // 在VSCode中，通常不需要手动设置光标位置
-        // InlineCompletion会自动将光标放置在补全内容的末尾
-        // 这里只是记录日志供调试
-        this.logger.debug(`   📍 光标将自动定位到补全内容末尾`);
       }
       
       // 详细的调试信息
@@ -410,100 +358,24 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       this.logger.info(insertText);
       this.logger.info(`   🔗 模式: ${range.start.isEqual(range.end) ? '插入模式' : '范围替换模式'}`);
       
-      // 如果是范围替换模式，记录API指导的替换信息
-      if (!range.start.isEqual(range.end) && completion.range) {
-        this.logger.info(`   ✨ API范围替换: 行${completion.range.startLine}-${completion.range.endLine}`);
-      }
-      
-      // 记录光标预测信息
+      // 光标预测仅用于日志
       if (completion.cursorPosition) {
         this.logger.info(`   🎯 光标预测: 行${completion.cursorPosition.line}, 列${completion.cursorPosition.column}`);
       } else {
         this.logger.debug(`   📍 无光标预测信息（将使用默认位置）`);
       }
       
-      // 🧪 测试：强制使用一个简单的测试补全
-      const FORCE_TEST_COMPLETION = false; // 设置为 true 进行测试
-      if (FORCE_TEST_COMPLETION) {
-        insertText = "// 测试幽灵文本显示";
-        range = new vscode.Range(position, position);
-        this.logger.info(`🧪 强制测试补全: "${insertText}"`);
-      }
-      
-      // 🔧 CRITICAL: 增强验证补全项的有效性
+      // 有效性校验
       if (!insertText || insertText.length === 0) {
         this.logger.warn('⚠️ 补全文本为空，VSCode不会显示幽灵文本');
         return undefined;
       }
-      
       if (range.start.isAfter(range.end)) {
         this.logger.error('❌ 无效的范围：起始位置在结束位置之后');
         return undefined;
       }
       
-      // 🔧 CRITICAL: 智能边界检查 - 适应范围替换模式
-      const maxLine = document.lineCount - 1;
-      if (range.start.line < 0 || range.start.line > maxLine) {
-        this.logger.error(`❌ 起始行超出边界: ${range.start.line} (max: ${maxLine})`);
-        return undefined;
-      }
-      
-      // 对于范围替换模式，允许结束行超出范围但要限制在合理范围内
-      if (range.end.line > maxLine) {
-        if (!range.start.isEqual(range.end)) {
-          // 范围替换模式: 调整结束位置到文档末尾
-          const adjustedEnd = new vscode.Position(maxLine, Number.MAX_SAFE_INTEGER);
-          range = new vscode.Range(range.start, adjustedEnd);
-          this.logger.info(`🔧 调整范围结束位置到文档末尾: ${adjustedEnd.line}`);
-        } else {
-          // 插入模式: 不允许超出边界
-          this.logger.error(`❌ 结束行超出边界: ${range.end.line} (max: ${maxLine})`);
-          return undefined;
-        }
-      }
-      
-      // 🧪 详细调试：检查VSCode InlineCompletionItem 属性
-      const insertTextStr = typeof item.insertText === 'string' ? item.insertText : item.insertText.value;
-      this.logger.info(`🔍 创建的 InlineCompletionItem 详细信息:`);
-      this.logger.info(`   📝 insertText: "${insertTextStr}" (长度: ${insertTextStr.length})`);
-      this.logger.info(`   📐 range: ${item.range ? `${item.range.start.line}:${item.range.start.character}-${item.range.end.line}:${item.range.end.character}` : 'undefined'}`);
-      this.logger.info(`   📍 range.isEmpty: ${item.range?.isEmpty}`);
-      this.logger.info(`   🆔 item类型: ${item.constructor.name}`);
-      
-      // 🔧 创建最终的 InlineCompletionItem
-      const completionItem = new vscode.InlineCompletionItem(insertText);
-      if (completion.range && completion.range.startLine !== undefined && completion.range.endLine !== undefined) {
-        completionItem.range = range;
-        
-        // 🔧 关键修复：使用 API Proposal 字段支持多行范围替换
-        (completionItem as any).isInlineEdit = true;  // 标记为内联编辑
-        (completionItem as any).showRange = range;    // 显示范围
-        (completionItem as any).showInlineEditMenu = true;  // 显示编辑菜单
-        
-        this.logger.info(`🔧 应用 API Proposal 字段:`);
-        this.logger.info(`   🎯 isInlineEdit: true`);
-        this.logger.info(`   📍 showRange: ${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`);
-        this.logger.info(`   📋 showInlineEditMenu: true`);
-      }
-      
-      const itemInsertTextStr = typeof completionItem.insertText === 'string' ? completionItem.insertText : completionItem.insertText.value;
-      this.logger.info(`🎯 补全项创建成功:`);
-      this.logger.info(`   📝 完整 insertText:`);
-      this.logger.info(itemInsertTextStr);
-      this.logger.info(`   📐 range: ${completionItem.range ? 'defined' : 'undefined'}`);
-      if (completionItem.range) {
-        this.logger.info(`       起始: ${completionItem.range.start.line}:${completionItem.range.start.character}`);
-        this.logger.info(`       结束: ${completionItem.range.end.line}:${completionItem.range.end.character}`);
-        this.logger.info(`       类型: ${completionItem.range.isEmpty ? '插入' : '替换'}`);
-      }
-      
-      // 🔧 返回InlineCompletionList以确保更好的控制
-      const completionList = new vscode.InlineCompletionList([completionItem]);
-      
-      this.logger.info(`🚀 返回补全列表，包含 ${completionList.items.length} 个项目`);
-      this.logger.info(`   🔍 最终模式: ${range.start.isEqual(range.end) ? '插入' : '替换'} (范围: ${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character})`);
-      
-      // 🎯 记录补全项和 bindingId 的映射
+      // 记录补全项与 bindingId 的映射
       if (completion.bindingId) {
         const completionKey = this.generateCompletionKey(completionItem);
         this.completionBindings.set(completionKey, {
@@ -511,12 +383,10 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
           requestTime: Date.now()
         });
         this.logger.debug(`🎯 存储补全绑定: ${completionKey} -> ${completion.bindingId}`);
-        
-        // 清理过期的绑定
         this.cleanupExpiredBindings();
       }
       
-      // 返回补全项数组
+      // 返回补全项数组（Proposed API 将以多行范围展示幽灵文本与内联编辑）
       return [completionItem];
       
     } catch (error) {
