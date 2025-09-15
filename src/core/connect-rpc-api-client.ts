@@ -98,7 +98,7 @@ export class ConnectRpcApiClient {
       defaultTimeoutMs: options.timeout || 10000, // 减少超时时间到10秒
       interceptors: [
         // 响应拦截器 - 记录HTTP响应状态和内容
-        (next) => async (req) => {
+        (next: any) => async (req: any) => {
           try {
             const response = await next(req);
             this.logger.info(`✅ HTTP 响应成功: ${req.url}`);
@@ -106,13 +106,22 @@ export class ConnectRpcApiClient {
             // 📊 调试：记录响应头部信息
             if (response.header) {
               this.logger.info('📋 响应头部:');
-              response.header.forEach((value, key) => {
+              response.header.forEach((value: string, key: string) => {
                 this.logger.info(`  ${key}: ${value}`);
               });
             }
             
             return response;
           } catch (error) {
+            const aborted = (error as any)?.name === 'AbortError'
+              || (error as any)?.code === 1
+              || (error as any)?.code === 20
+              || ((error as any)?.message || '').toLowerCase().includes('aborted')
+              || ((error as any)?.rawMessage || '').toLowerCase().includes('aborted');
+            if (aborted) {
+              this.logger.debug(`🛑 请求已取消: ${req.url}`);
+              throw error;
+            }
             this.logger.error(`❌ HTTP 响应失败: ${req.url}`, error as Error);
             
             // 🔍 增强错误日志：尝试提取更多错误信息
@@ -186,7 +195,7 @@ export class ConnectRpcApiClient {
           
           // 打印所有头部信息
           this.logger.info('📋 请求头部:');
-          req.header.forEach((value, key) => {
+          req.header.forEach((value: string, key: string) => {
             if (key.toLowerCase().includes('auth') || key.toLowerCase().includes('cursor')) {
               const displayValue = key.toLowerCase().includes('authorization') 
                 ? `${value.substring(0, 20)}...` 
@@ -206,12 +215,21 @@ export class ConnectRpcApiClient {
       defaultTimeoutMs: options.timeout || 15000,
       interceptors: [
         // 响应拦截器 - 记录HTTP响应状态
-        (next) => async (req) => {
+        (next: any) => async (req: any) => {
           try {
             const response = await next(req);
             this.logger.info(`✅ FileSyncService HTTP 响应成功: ${req.url}`);
             return response;
           } catch (error) {
+            const aborted = (error as any)?.name === 'AbortError'
+              || (error as any)?.code === 1
+              || (error as any)?.code === 20
+              || ((error as any)?.message || '').toLowerCase().includes('aborted')
+              || ((error as any)?.rawMessage || '').toLowerCase().includes('aborted');
+            if (aborted) {
+              this.logger.debug(`🛑 FileSyncService 请求已取消: ${req.url}`);
+              throw error;
+            }
             this.logger.error(`❌ FileSyncService HTTP 响应失败: ${req.url}`, error as Error);
             throw error;
           }
@@ -250,7 +268,7 @@ export class ConnectRpcApiClient {
           
           // 打印所有头部信息
           this.logger.info('📋 FileSyncService 请求头部:');
-          req.header.forEach((value, key) => {
+          req.header.forEach((value: string, key: string) => {
             if (key.toLowerCase().includes('auth') || 
                 key.toLowerCase().includes('cursor') || 
                 key.toLowerCase().includes('client') ||
@@ -323,16 +341,9 @@ export class ConnectRpcApiClient {
       
       // 🚨 关键修复：动态处理additionalFiles
       if (request.additionalFiles && request.additionalFiles.length > 0) {
-        this.logger.info(`🔍 发现 ${request.additionalFiles.length} 个附加文件，检查兼容性...`);
-        this.logger.debug(`📋 附加文件: ${request.additionalFiles.map(f => f.path).join(', ')}`);
-        
-        // 如果将使用内容模式，移除additionalFiles以避免"File not found"错误
-        if (!canUseFileSync) {
-          this.logger.warn(`⚠️ 内容模式不兼容附加文件，移除 ${request.additionalFiles.length} 个附加文件`);
-          request.additionalFiles = [];
-        } else {
-          this.logger.info(`✅ 文件同步模式，保留 ${request.additionalFiles.length} 个附加文件`);
-        }
+        this.logger.info(`🔍 发现 ${request.additionalFiles.length} 个附加文件，进入引用模式`);
+        // 在引用模式下强制依赖文件同步
+        canUseFileSync = true;
       }
       this.logger.info(`🔍 文件同步检查结果: ${canUseFileSync ? '可使用文件同步' : '需要上传文件'}`);
       if (!canUseFileSync) {
@@ -536,7 +547,7 @@ export class ConnectRpcApiClient {
       const timeoutId = setTimeout(() => {
         this.logger.debug('⏰ 流式请求超时，自动取消');
         timeoutController.abort();
-      }, 30000); // 30秒超时 - 给代码补全更多时间
+      }, 120000); // 120秒超时 - 流式补全可能更慢
 
       const combinedSignal = abortSignal ? 
         this.combineAbortSignals([abortSignal, timeoutController.signal]) :
@@ -587,11 +598,78 @@ export class ConnectRpcApiClient {
             break;
           }
         }
+      } catch (error) {
+        const aborted = (error as any)?.name === 'AbortError'
+          || (error as any)?.code === 1
+          || (error as any)?.code === 20
+          || ((error as any)?.message || '').toLowerCase().includes('aborted')
+          || ((error as any)?.rawMessage || '').toLowerCase().includes('aborted')
+          || (abortSignal?.aborted === true);
+        if (aborted) {
+          this.logger.debug('🛑 StreamCpp 流式请求被取消');
+          return;
+        }
+        this.logger.error('❌ Connect RPC StreamCpp 调用失败', error as Error);
+        
+        // 🔍 增强错误日志：详细分析错误类型和内容
+        if (error && typeof error === 'object') {
+          this.logger.error('🔍 详细错误分析:');
+          this.logger.error(`  🚨 错误类型: ${ (error as any).constructor ? (error as any).constructor.name : 'Unknown' }`);
+          this.logger.error(`  📝 错误消息: ${(error as any).message || '无消息'}`);
+          
+          // ConnectError 特定信息
+          if ('code' in (error as any)) {
+            this.logger.error(`  🔢 错误码: ${(error as any).code}`);
+          }
+          if ('rawMessage' in (error as any)) {
+            this.logger.error(`  📜 原始消息: ${(error as any).rawMessage}`);
+          }
+          if ('details' in (error as any)) {
+            this.logger.error(`  📋 错误详情: ${JSON.stringify((error as any).details, null, 2)}`);
+          }
+          if ('metadata' in (error as any)) {
+            this.logger.error(`  🏷️ 元数据: ${JSON.stringify((error as any).metadata, null, 2)}`);
+          }
+          
+          // HTTP 相关错误信息
+          if ('status' in (error as any)) {
+            this.logger.error(`  🌐 HTTP状态: ${(error as any).status}`);
+          }
+          if ('statusText' in (error as any)) {
+            this.logger.error(`  📤 状态文本: ${(error as any).statusText}`);
+          }
+          if ('url' in (error as any)) {
+            this.logger.error(`  🔗 请求URL: ${(error as any).url}`);
+          }
+          
+          // 完整错误对象（用于深度调试）
+          try {
+            const errorJson = JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
+            this.logger.error(`  📄 完整错误对象: ${errorJson}`);
+          } catch (jsonError) {
+            this.logger.error('  ⚠️ 无法序列化错误对象');
+          }
+          
+          // 堆栈跟踪
+          if ('stack' in (error as any) && (error as any).stack) {
+            this.logger.error(`  📚 堆栈跟踪: ${(error as any).stack}`);
+          }
+        }
       } finally {
         clearTimeout(timeoutId);
       }
 
     } catch (error) {
+      const aborted = (error as any)?.name === 'AbortError'
+        || (error as any)?.code === 1
+        || (error as any)?.code === 20
+        || ((error as any)?.message || '').toLowerCase().includes('aborted')
+        || ((error as any)?.rawMessage || '').toLowerCase().includes('aborted')
+        || (abortSignal?.aborted === true);
+      if (aborted) {
+        this.logger.debug('🛑 StreamCpp 已取消（外部或超时）');
+        return;
+      }
       this.logger.error('❌ Connect RPC StreamCpp 调用失败', error as Error);
       
       // 🔍 增强错误日志：详细分析错误类型和内容
@@ -647,7 +725,7 @@ export class ConnectRpcApiClient {
    * 上传文件
    * 使用 Connect RPC Unary 调用
    */
-  async uploadFile(fileInfo: FileInfo, workspaceId: string): Promise<FSUploadFileResponse> {
+  async uploadFile(fileInfo: FileInfo, workspaceId: string, abortSignal?: AbortSignal): Promise<FSUploadFileResponse> {
     try {
       this.logger.info(`📤 Connect RPC 上传文件: ${fileInfo.path}`);
       this.logger.info(`🆔 使用工作区ID: ${workspaceId}`);
@@ -670,8 +748,7 @@ export class ConnectRpcApiClient {
       this.logger.info(`📊 文件大小: ${uploadRequest.contents.length} 字符`);
       this.logger.info(`🔐 SHA256: ${uploadRequest.sha256Hash?.substring(0, 16) || 'undefined'}...`);
       this.logger.info(`📦 UUID: ${uploadRequest.uuid}`);
-
-      const response = await this.fileSyncClient.fSUploadFile(uploadRequest);
+      const response = await this.fileSyncClient.fSUploadFile(uploadRequest, { signal: abortSignal });
       
       this.logger.info('✅ Connect RPC 文件上传成功');
       this.logger.info(`📝 返回信息: 错误码=${response.error} (0=成功)`);
@@ -692,7 +769,7 @@ export class ConnectRpcApiClient {
    * 增量同步文件
    * 使用 Connect RPC Unary 调用，发送文件差异而非完整内容
    */
-  async syncFile(fileInfo: FileInfo, workspaceId: string, oldContent: string): Promise<FSSyncFileResponse> {
+  async syncFile(fileInfo: FileInfo, workspaceId: string, oldContent: string, abortSignal?: AbortSignal): Promise<FSSyncFileResponse> {
     try {
       this.logger.info(`🔄 Connect RPC 增量同步文件: ${fileInfo.path}`);
       this.logger.info(`🆔 使用工作区ID: ${workspaceId}`);
@@ -744,8 +821,7 @@ export class ConnectRpcApiClient {
       
       this.logger.info('📡 发送 Connect RPC FSSyncFile 请求');
       this.logger.debug(`🔍 请求详情: UUID=${uuid}, 版本=${currentModelVersion}->${newModelVersion}`);
-      
-      const response = await this.fileSyncClient.fSSyncFile(syncRequest);
+      const response = await this.fileSyncClient.fSSyncFile(syncRequest, { signal: abortSignal });
       
       this.logger.info('✅ Connect RPC 文件增量同步成功');
       this.logger.info(`📝 返回信息: 错误码=${response.error} (0=成功)`);

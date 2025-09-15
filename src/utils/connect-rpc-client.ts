@@ -23,6 +23,7 @@ export interface ConnectRpcStreamOptions {
   signal?: AbortSignal;
   timeout?: number;
   encoding?: 'json' | 'protobuf';
+  headers?: Record<string, string>;
 }
 
 /**
@@ -56,7 +57,7 @@ export class ConnectRpcClient {
   /**
    * 构建Connect RPC请求头
    */
-  private buildHeaders(encoding: 'json' | 'protobuf' = 'json'): Record<string, string> {
+  private buildHeaders(encoding: 'json' | 'protobuf' = 'json', extra?: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${this.authToken}`,
       'x-client-key': this.clientKey,
@@ -68,6 +69,12 @@ export class ConnectRpcClient {
       headers['Content-Type'] = 'application/json';
     } else {
       headers['Content-Type'] = 'application/proto';
+    }
+
+    if (extra) {
+      for (const [k, v] of Object.entries(extra)) {
+        headers[k] = v;
+      }
     }
 
     return headers;
@@ -138,7 +145,7 @@ export class ConnectRpcClient {
 
       // 发起Connect RPC调用
       const url = `${this.baseUrl}/aiserver.v1.AiService/StreamCpp`;
-      const headers = this.buildHeaders(encoding);
+      const headers = this.buildHeaders(encoding, options.headers);
 
       this.logger.info(`📡 请求URL: ${url}`);
       this.logger.info(`📡 请求头:`, headers);
@@ -221,8 +228,8 @@ export class ConnectRpcClient {
         requestBody = this.protobufUtils.createFSUploadFileRequest(fileInfo, uuid);
       }
 
-      const url = `${this.baseUrl}/aiserver.v1.FileSyncService/FSUploadFile`;
-      const headers = this.buildHeaders(encoding);
+      let url = `${this.baseUrl}/aiserver.v1.FileSyncService/FSUploadFile`;
+      const headers = this.buildHeaders(encoding, options.headers);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -230,15 +237,35 @@ export class ConnectRpcClient {
       if (signal) {
         signal.addEventListener('abort', () => controller.abort());
       }
+      // 手动处理最多3次重定向
+      let response: Response | null = null;
+      for (let redirects = 0; redirects <= 3; redirects++) {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: requestBody,
+          signal: controller.signal,
+          redirect: 'manual'
+        } as any);
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: requestBody,
-        signal: controller.signal,
-      });
+        if (res.status >= 300 && res.status < 400) {
+          const location = res.headers.get('location');
+          if (!location) {
+            response = res;
+            break;
+          }
+          url = new URL(location, url).toString();
+          continue;
+        }
+        response = res;
+        break;
+      }
 
       clearTimeout(timeoutId);
+
+      if (!response) {
+        return { success: false, error: '未获得有效响应' };
+      }
 
       if (!response.ok) {
         return {

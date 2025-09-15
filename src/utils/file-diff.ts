@@ -17,86 +17,9 @@ export class FileDiffCalculator {
    * 返回可用于增量同步的更新列表
    */
   calculateDiff(oldContent: string, newContent: string): SingleUpdateRequest[] {
-    // 优先使用LCS算法，对复杂差异有更好的处理
-    if (Math.abs(oldContent.length - newContent.length) > 100 || 
-        oldContent.split('\n').length !== newContent.split('\n').length) {
-      this.logger.debug('🔧 使用LCS算法处理复杂差异');
-      return this.calculateOptimizedDiff(oldContent, newContent);
-    }
-    
-    const updates: SingleUpdateRequest[] = [];
-    
-    // 简单的逐字符差异检测算法
-    const oldLines = oldContent.split('\n');
-    const newLines = newContent.split('\n');
-    
-    let oldPos = 0;
-    let newPos = 0;
-    let oldCharPos = 0;
-    
-    // 逐行比较
-    while (oldPos < oldLines.length || newPos < newLines.length) {
-      if (oldPos >= oldLines.length) {
-        // 旧文件已结束，新文件还有内容 - 插入
-        const remainingLines = newLines.slice(newPos);
-        if (remainingLines.length > 0) {
-          const remainingContent = remainingLines.join('\n');
-          updates.push(new SingleUpdateRequest({
-            startPosition: oldCharPos,
-            endPosition: oldCharPos,
-            changeLength: remainingContent.length,
-            replacedString: remainingContent
-          }));
-        }
-        break;
-      } else if (newPos >= newLines.length) {
-        // 新文件已结束，旧文件还有内容 - 删除
-        const remainingLines = oldLines.slice(oldPos);
-        const remainingContent = remainingLines.join('\n');
-        updates.push(new SingleUpdateRequest({
-          startPosition: oldCharPos,
-          endPosition: oldCharPos + remainingContent.length,
-          changeLength: 0,
-          replacedString: ''
-        }));
-        break;
-      } else if (oldLines[oldPos] === newLines[newPos]) {
-        // 行相同，跳过
-        const lineLength = oldLines[oldPos].length;
-        // 正确处理换行符：除了最后一行，其他行都有换行符
-        const hasNewline = oldPos < oldLines.length - 1;
-        oldCharPos += lineLength + (hasNewline ? 1 : 0);
-        oldPos++;
-        newPos++;
-      } else {
-        // 行不同，需要替换
-        const oldLine = oldLines[oldPos];
-        const newLine = newLines[newPos];
-        
-        const lineStartPos = oldCharPos;
-        const lineEndPos = oldCharPos + oldLine.length;
-        
-        updates.push(new SingleUpdateRequest({
-          startPosition: lineStartPos,
-          endPosition: lineEndPos,
-          changeLength: newLine.length,
-          replacedString: newLine
-        }));
-        
-        // 正确处理换行符：除了最后一行，其他行都有换行符
-        const oldHasNewline = oldPos < oldLines.length - 1;
-        oldCharPos += oldLine.length + (oldHasNewline ? 1 : 0);
-        oldPos++;
-        newPos++;
-      }
-    }
-    
-    this.logger.debug(`📊 差异计算完成: 发现 ${updates.length} 个更新`);
-    updates.forEach((update, index) => {
-      this.logger.debug(`  更新 ${index + 1}: 位置 ${update.startPosition}-${update.endPosition}, 长度 ${update.changeLength}, 内容: "${update.replacedString.substring(0, 50)}${update.replacedString.length > 50 ? '...' : ''}"`);
-    });
-    
-    return updates;
+    // 为了避免由于不同换行符(CRLF/LF)导致的位置与长度不一致，这里使用字符级别的差异。
+    // 该方法生成一个连续的更新，能稳定避免 FileLengthMismatch。
+    return this.calculateOptimizedDiff(oldContent, newContent);
   }
 
   /**

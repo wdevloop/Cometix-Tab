@@ -250,11 +250,14 @@ export class ProtobufUtils {
       const content = currentFile.content || '';
       const lines = content.split('\n');
       
+      const isReferenceMode = !!(request.additionalFiles && request.additionalFiles.length > 0);
+
       // 构建JSON格式的Connect RPC消息
-      const jsonMessage = {
+      const jsonMessage: any = {
         currentFile: {
           relativeWorkspacePath: currentFile.path || 'unknown.ts',
-          contents: content,
+          // 在引用模式下不包含contents字段
+          ...(isReferenceMode ? {} : { contents: content }),
           cursorPosition: {
             line: request.cursorPosition.line,
             column: request.cursorPosition.column
@@ -263,7 +266,7 @@ export class ProtobufUtils {
           totalNumberOfLines: lines.length,
           contentsStartAtLine: 0,
           sha256Hash: currentFile.sha256 || '',
-          relyOnFilesync: false,
+          relyOnFilesync: isReferenceMode,
           workspaceRootPath: '',
           lineEnding: this.detectLineEnding(content),
           diagnostics: [],
@@ -284,6 +287,16 @@ export class ProtobufUtils {
         immediatelyAck: false,
         enableMoreContext: true
       };
+
+      // 在引用模式下添加 additional_files
+      if (isReferenceMode && request.additionalFiles) {
+        jsonMessage.additionalFiles = request.additionalFiles.map(f => ({
+          relativeWorkspacePath: f.path,
+          isOpen: false,
+          visibleRangeContent: [f.content],
+          lastViewedAt: Date.now() / 1000
+        }));
+      }
 
       this.logger.info('✅ Connect RPC JSON消息创建完成');
       return jsonMessage;

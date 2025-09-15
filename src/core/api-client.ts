@@ -81,7 +81,7 @@ export class CursorApiClient {
    * 上传文件到cursor-api服务器
    * 支持 Connect RPC 和手动实现两种方式
    */
-  async uploadFile(fileInfo: FileInfo): Promise<boolean> {
+  async uploadFile(fileInfo: FileInfo, abortSignal?: AbortSignal): Promise<boolean> {
     try {
       this.logger.info(`📤 上传文件: ${fileInfo.path}`);
       this.logger.debug(`📊 文件大小: ${fileInfo.content.length} 字符`);
@@ -89,7 +89,8 @@ export class CursorApiClient {
       if (this.useConnectRpc && this.connectRpcApiClient) {
         // 使用 Connect RPC 实现 - 🔧 使用统一的工作区ID
         const workspaceId = WorkspaceManager.getInstance().getWorkspaceId();
-        const response = await this.connectRpcApiClient.uploadFile(fileInfo, workspaceId);
+        // 传递取消信号
+        const response = await this.connectRpcApiClient.uploadFile(fileInfo, workspaceId, abortSignal);
         this.logger.info(`✅ Connect RPC 文件上传成功: ${fileInfo.path}`);
         return true;
       } else if (!this.useConnectRpc && this.connectRpcClient) {
@@ -97,7 +98,8 @@ export class CursorApiClient {
         const uuid = CryptoUtils.generateUUID();
         const result = await this.connectRpcClient.uploadFile(fileInfo, uuid, {
           encoding: 'json',
-          timeout: 15000
+          timeout: 15000,
+          signal: abortSignal
         });
         
         if (!result.success) {
@@ -112,7 +114,7 @@ export class CursorApiClient {
       
     } catch (error) {
       this.logger.error(`❌ 文件上传失败: ${fileInfo.path}`, error as Error);
-      return false;
+      throw error; // 让上层根据错误类型决定重试/失败
     }
   }
   

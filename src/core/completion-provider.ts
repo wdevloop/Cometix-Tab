@@ -12,6 +12,8 @@ import { completionTracker } from '../utils/completion-tracker';
 import { CompletionStateMachine } from './completion-state-machine';
 import { ContinuationManager } from './continuation-manager';
 import { isFeatureEnabled } from '../utils/feature-flags';
+import { CryptoUtils } from '../utils/crypto';
+import { Telemetry } from '../utils/telemetry';
 
 export class CursorCompletionProvider implements vscode.InlineCompletionItemProvider {
   private logger: Logger;
@@ -19,7 +21,9 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
   private fileManager: FileManager;
   private smartDiffer: SmartCompletionDiffer;
   private abortController: AbortController | null = null;
-  private lastRequestTime: number = 0;
+  private lastRequestTime: number = 0; // deprecated; use per-editor map
+  private lastRequestTimeByEditor = new Map<string, number>();
+  private inFlightByKey = new Set<string>();
   private debounceTimer: NodeJS.Timeout | null = null;
   private lastDocumentState: { version: number; content: string } | null = null;
   private readonly MIN_REQUEST_INTERVAL = 200; // 最小请求间隔200ms
@@ -71,140 +75,24 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     context: vscode.InlineCompletionContext,
     token: vscode.CancellationToken
   ): Promise<vscode.InlineCompletionItem[] | vscode.InlineCompletionList | undefined> {
-    
     // 🔧 首先检查扩展是否启用
     const config = ConfigManager.getConfig();
-    if (!config.enabled) {
-      this.logger.debug('🚫 扩展已禁用，跳过补全');
-      return undefined;
-    }
-    
-    // 🔧 检查snooze状态
-    if (config.snoozeUntil > Date.now()) {
-      this.logger.debug('😴 扩展处于snooze状态，跳过补全');
-      return undefined;
-    }
-    
-    // 🧪 检查是否为测试模式或强制触发调用
+    if (!config.enabled) return undefined;
+    if (config.snoozeUntil > Date.now()) return undefined;
+
+    // 🧪 测试或强制触发
     const isTestMode = (context as any).requestUuid === 'test-uuid';
     const isForceTrigger = (context as any).requestUuid === 'force-trigger';
-    
     if (isTestMode || isForceTrigger) {
-      const mode = isTestMode ? '🧪 测试模式' : '🚀 强制触发模式';
-      this.logger.info(`${mode}调用，直接执行补全`);
       try {
         return await this.executeCompletion(document, position, context, token, true, null);
-      } catch (error) {
-        this.logger.error(`❌ ${mode}代码补全执行失败`, error as Error);
+      } catch {
         return undefined;
       }
     }
-    
-    return new Promise((resolve) => {
-      // 清除之前的防抖计时器
-      if (this.debounceTimer) {
-        clearTimeout(this.debounceTimer);
-      }
-      
-      // 🔧 使用业界最佳实践的智能触发检测
-      const smartTriggerCheck = smartEditDetector.shouldTriggerCompletion(document, position);
-      const debounceTime = smartTriggerCheck.debounceTime;
-      
-      this.logger.debug(`🧠 智能触发检查: ${smartTriggerCheck.reason}`);
-      this.logger.debug(`🕒 自适应防抖: ${debounceTime}ms, 置信度: ${smartTriggerCheck.confidence?.toFixed(2) || 'N/A'}`);
-      
-      if (!smartTriggerCheck.shouldTrigger) {
-        this.logger.debug('🚫 智能检测器建议不触发补全');
-        resolve(undefined);
-        return;
-      }
-      
-      // 记录触发时间用于性能分析
-      const triggerStartTime = Date.now();
-      
-      // 设置自适应防抖延迟
-      this.debounceTimer = setTimeout(async () => {
-        // 🔄 状态机：开始生成（如果启用）
-        let handlerId: string | null = null;
-        if (this.stateMachine) {
-          handlerId = this.stateMachine.createHandler(
-            { line: position.line, character: position.character },
-            this.abortController || undefined
-          );
-          
-          if (handlerId) {
-            this.currentHandlerId = handlerId;
-            this.stateMachine.beginGenerate(handlerId, 'user_trigger');
-          } else {
-            this.logger.warn('🚫 无法创建补全处理器，可能达到并发限制');
-            resolve(undefined);
-            return;
-          }
-        }
-        
-        try {
-          const result = await this.executeCompletion(document, position, context, token, false, handlerId);
-          
-          // 记录补全性能指标
-          const responseTime = Date.now() - triggerStartTime;
-          
-          // 完整的补全生命周期跟踪
-          if (result && Array.isArray(result) && result.length > 0) {
-            const completionItem = result[0];
-            const trackingId = completionTracker.trackCompletion(document, position, completionItem);
-            
-            // 设置补全生命周期事件回调
-            const originalOnAccepted = completionTracker.onCompletionAccepted;
-            const originalOnDismissed = completionTracker.onCompletionDismissed;
-            
-            completionTracker.onCompletionAccepted = (completion) => {
-              // 记录性能指标
-              smartEditDetector.recordCompletionMetrics(document, responseTime, true);
-              this.logger.info(`✅ 补全被接受: ${trackingId}, 响应时间: ${responseTime}ms`);
-              
-              // 触发分析以优化未来的补全触发
-              this.analyzeAcceptedCompletion(completion, document, position);
-              
-              // 调用原始回调
-              originalOnAccepted?.(completion);
-            };
-            
-            completionTracker.onCompletionDismissed = (completion) => {
-              // 记录被忽略的补全
-              smartEditDetector.recordCompletionMetrics(document, responseTime, false);
-              this.logger.debug(`❌ 补全被忽略: ${trackingId}, 生存时间: ${Date.now() - completion.triggerTime}ms`);
-              
-              // 分析忽略原因以改进策略
-              this.analyzeDismissedCompletion(completion, document, position);
-              
-              // 调用原始回调
-              originalOnDismissed?.(completion);
-            };
-            
-            // 记录补全触发信息
-            this.logger.debug(`🎯 补全跟踪开始: ${trackingId}, 文本长度: ${completionItem.insertText?.toString().length || 0}`);
-          } else {
-            // 没有补全结果，记录为失败
-            smartEditDetector.recordCompletionMetrics(document, responseTime, false);
-          }
-          
-          resolve(result);
-        } catch (error) {
-          this.logger.error('❌ 代码补全执行失败', error as Error);
-          
-          // 🔄 状态机：处理错误
-          if (this.stateMachine && handlerId) {
-            this.stateMachine.handleError(error as Error, handlerId);
-          }
-          
-          // 记录失败的指标
-          const responseTime = Date.now() - triggerStartTime;
-          smartEditDetector.recordCompletionMetrics(document, responseTime, false);
-          
-          resolve(undefined);
-        }
-      }, debounceTime);
-    });
+
+    // 直接执行（移除自适应防抖与智能 gating）
+    return this.executeCompletion(document, position, context, token, false, null);
   }
   
   private async executeCompletion(
@@ -215,8 +103,12 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
     isTestMode: boolean = false,
     handlerId?: string | null
   ): Promise<vscode.InlineCompletionItem[] | vscode.InlineCompletionList | undefined> {
+    const editorKey = document.uri.toString();
+    const requestKey = `${editorKey}:${position.line}:${position.character}`;
+    const requestId = CryptoUtils.generateUUID();
     try {
       this.logger.debug(`🔍 触发代码补全 - 文件: ${document.fileName}, 位置: ${position.line}:${position.character}${handlerId ? `, Handler: ${handlerId}` : ''}`);
+      Telemetry.emit('completion_triggered', { request_id: requestId, mode: 'unknown' });
       
       // 检查是否应该触发补全（测试模式跳过检查）
       if (!isTestMode && !this.shouldTriggerCompletionBasic(document, position)) {
@@ -226,14 +118,20 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         return undefined;
       }
       
-      // 检查请求频率限制（测试模式跳过检查）
+      // 检查请求频率限制（按编辑器实例）
       const now = Date.now();
-      const timeSinceLastRequest = now - this.lastRequestTime;
-      if (!isTestMode && timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
-        this.logger.debug(`⏰ 请求过于频繁，跳过 (间隔: ${timeSinceLastRequest}ms < ${this.MIN_REQUEST_INTERVAL}ms)`);
+      const lastTs = this.lastRequestTimeByEditor.get(editorKey) || 0;
+      const timeSinceLast = now - lastTs;
+      if (!isTestMode && timeSinceLast < this.MIN_REQUEST_INTERVAL) {
+        this.logger.debug(`⏰ 请求过于频繁，跳过 (间隔: ${timeSinceLast}ms < ${this.MIN_REQUEST_INTERVAL}ms)`);
         if (this.stateMachine && handlerId) {
           this.stateMachine.backToIdle(handlerId, 'rate_limit');
         }
+        return undefined;
+      }
+      // 去重：相同文档与位置的并发请求不重复发起
+      if (this.inFlightByKey.has(requestKey)) {
+        this.logger.debug(`🛑 去重：已有相同位置请求进行中，跳过 (${requestKey})`);
         return undefined;
       }
       
@@ -244,6 +142,8 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       }
       this.abortController = new AbortController();
       this.lastRequestTime = now;
+      this.lastRequestTimeByEditor.set(editorKey, now);
+      this.inFlightByKey.add(requestKey);
       
       // 获取当前文件信息
       const currentFile = await this.fileManager.getCurrentFileInfo(document);
@@ -272,6 +172,19 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       const additionalFiles = allContextFiles.filter(file => file.path !== currentFilePath);
       this.logger.info(`📋 过滤后的附加文件数: ${additionalFiles.length} (排除当前文件: ${currentFilePath})`);
 
+      // 🔧 设计要求：限制多文件上下文数量与总大小（最大3个文件，总序列化≤50KB）
+      const MAX_CTX_FILES = 3;
+      const MAX_TOTAL_BYTES = 50 * 1024;
+      const prioritized = additionalFiles.slice(0, MAX_CTX_FILES);
+      let totalBytes = 0;
+      const cappedFiles = [] as typeof prioritized;
+      for (const f of prioritized) {
+        const bytes = Buffer.from(f.content || '', 'utf8').length;
+        if (totalBytes + bytes > MAX_TOTAL_BYTES) break;
+        totalBytes += bytes;
+        cappedFiles.push(f);
+      }
+
       // 构建补全请求
       const request: CompletionRequest = {
         currentFile,
@@ -280,15 +193,36 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
           column: position.character
         },
         context: this.getContext(document, position),
-        modelName: 'auto', // TODO: 从配置中获取
-        debugOutput: true, // 开启调试输出
-        // 多文件上下文支持 - 显著提升补全质量
-        additionalFiles: additionalFiles
+        modelName: 'auto',
+        debugOutput: false,
+        additionalFiles: cappedFiles
       };
-      
+
       this.logger.debug(`🚀 准备发送补全请求`);
-      
+
+      // 🔧 文件引用模式：在发送请求前先完成FS批量上传 (currentFile ∪ additionalFiles)
+      if (request.additionalFiles && request.additionalFiles.length > 0) {
+        try {
+          const { FSBatchUploader } = await import('./fs-batch-uploader');
+          const uploader = new FSBatchUploader(this.apiClient);
+          const filesToUpload = [request.currentFile, ...request.additionalFiles];
+          Telemetry.emit('fs_upload_started', { request_id: requestId, fs_total_count: filesToUpload.length });
+          const result = await uploader.uploadBatch(filesToUpload, this.abortController.signal);
+          if (!result.ok) {
+            this.logger.warn(`❌ FS 批量上传失败: code=${result.diagnosticCode}, fs_batch_id=${result.fsBatchId}`);
+            Telemetry.emit('completion_cancelled', { request_id: requestId, reason: 'fs-failure', error_code: result.diagnosticCode, fs_batch_id: result.fsBatchId });
+            return undefined;
+          }
+          Telemetry.emit('fs_upload_finished', { request_id: requestId, fs_batch_id: result.fsBatchId, fs_completed_count: result.fsCompletedCount, fs_total_count: result.fsTotalCount, fs_wait_ms: result.fsWaitMs });
+        } catch (e) {
+          this.logger.warn(`❌ FS 批量上传过程中出现错误，取消补全: ${(e as Error).message}`);
+          Telemetry.emit('completion_cancelled', { request_id: requestId, reason: 'fs-error' });
+          return undefined;
+        }
+      }
+
       // 请求补全
+      Telemetry.emit('completion_stream_started', { request_id: requestId, sse_start_ts: Date.now() });
       const messageStream = await this.apiClient.requestCompletion(request, this.abortController.signal);
       if (!messageStream) {
         this.logger.warn('⚠️  API客户端返回null，无法获取补全');
@@ -301,6 +235,7 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         this.logger.debug('📭 没有获得有效的补全内容');
         return undefined;
       }
+      Telemetry.emit('completion_stream_ended', { request_id: requestId });
       
       this.logger.info('✅ 获得补全内容:');
       this.logger.info(completion.text);
@@ -391,7 +326,8 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
       
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        this.logger.debug('🛑 补全请求被取消');
+        this.logger.debug('�� 补全请求被取消');
+        Telemetry.emit('completion_cancelled', { request_id: requestKey, reason: 'input-change' });
         if (this.stateMachine && handlerId) {
           this.stateMachine.backToIdle(handlerId, 'cancelled');
         }
@@ -403,6 +339,8 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         this.stateMachine.handleError(error as Error, handlerId);
       }
       return undefined;
+    } finally {
+      this.inFlightByKey.delete(requestKey);
     }
   }
 
@@ -423,9 +361,22 @@ export class CursorCompletionProvider implements vscode.InlineCompletionItemProv
         this.logger.debug('📍 位置无效，跳过补全');
         return false;
       }
+      // 触发条件：
+      const lineText = document.lineAt(position.line).text;
+      const before = lineText.substring(0, position.character);
+      const after = lineText.substring(position.character);
+      const trimmedBefore = before.trimEnd();
+      const lastToken = trimmedBefore.split(/\s+/).pop() || '';
+      const atLineEnd = position.character >= lineText.length;
+      const postOperator = trimmedBefore.endsWith('.') || trimmedBefore.endsWith('->') || trimmedBefore.endsWith('::');
+      const hasTwoCharsAfterWs = lastToken.length >= 2;
 
-      this.logger.debug(`🔍 基础检查通过 - 位置: ${position.line}:${position.character}`);
-      return true;
+      if (atLineEnd || postOperator || hasTwoCharsAfterWs) {
+        this.logger.debug(`🔍 基础检查通过 - 位置: ${position.line}:${position.character}`);
+        return true;
+      }
+      this.logger.debug('🚫 基础触发条件未满足');
+      return false;
 
     } catch (error) {
       this.logger.warn('⚠️ 基础检查时出错', error as Error);
